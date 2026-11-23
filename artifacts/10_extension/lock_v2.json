@@ -1,0 +1,26 @@
+{
+  "version": "hybrid_v2_pa1",
+  "locked_at": "2026-11-20T21:30:00+07:00",
+  "routing": {
+    "S_fallback_degradations": ["real", "clip", "xband", "small", "big", "mix", "mud"],
+    "S_fallback_quantization_guard_rms_db": 24.0,
+    "vocal_mask_P_degradations": ["vocal"],
+    "full_mix_P": "all_other_linear_degradations"
+  },
+  "branch_p": {
+    "order": ["rms_match", "match_eq_fir", "match_dynamics", "match_stereo", "match_volume_lufs"],
+    "eq_clamp_db": 18.0
+  },
+  "vocal_mask": {
+    "separator": "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+    "clamp_min": 0.2,
+    "clamp_max": 0.8
+  },
+  "dev_gates_280": {
+    "SSIM": {"A0": 0.6064, "Hybrid_v2_PA1": 0.7120, "delta": 0.1056, "pass": true},
+    "KL_x1000": {"A0": 1.1064, "Hybrid_v2_PA1": 1.1215, "ratio": 1.014, "pass": true},
+    "FAD_CLAP": {"A0": 0.2145, "Hybrid_v2_PA1": 0.1744, "ratio": 0.813, "pass": true},
+    "Audiobox_PQ": {"A0": 7.6452, "Hybrid_v2_PA1": 7.6302, "delta": -0.0151, "ci95_lo": -0.0397, "pass": true},
+    "attribute_guards_violations": []
+  }
+}

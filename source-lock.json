@@ -1,0 +1,110 @@
+{
+  "project": "SonicMaster-Paper-Reproduction",
+  "paper": {
+    "title": "SonicMaster: Towards Controllable All-in-One Music Restoration and Mastering",
+    "venue": "Proceedings of the 43rd International Conference on Machine Learning (ICML 2026), Seoul, South Korea",
+    "authors": [
+      "Jan Melechovsky",
+      "Ambuj Mehrish",
+      "Abhinaba Roy",
+      "Dorien Herremans"
+    ],
+    "arxiv_id": "2508.0338",
+    "arxiv_alt_id": "2508.03448",
+    "arxiv_url": "https://arxiv.org/abs/2508.0338",
+    "official_samples_page": "https://amaai-lab.github.io/SonicMaster/",
+    "huggingface_space": "https://huggingface.co/spaces/amaai-lab/SonicMaster"
+  },
+  "repositories": [
+    {
+      "name": "SonicMaster-Code",
+      "type": "git_repository",
+      "url": "https://github.com/AMAAI-Lab/SonicMaster.git",
+      "pinned_commit": "ab32b2d456e461b6bbc188d666caf2eabefa2f31",
+      "license": "Apache-2.0",
+      "access_requirements": "Public",
+      "local_path": "SonicMaster",
+      "verified": true
+    }
+  ],
+  "model_weights": [
+    {
+      "name": "SonicMaster-Large",
+      "type": "huggingface_model",
+      "repo_id": "amaai-lab/SonicMaster",
+      "url": "https://huggingface.co/amaai-lab/SonicMaster",
+      "pinned_revision": "93c7fa73c4dd446c9e656af34524b5f6a416afda",
+      "target_file": "model.safetensors",
+      "license": "Apache-2.0",
+      "access_requirements": "Public",
+      "components": [
+        "model.safetensors",
+        "optimizer.bin",
+        "scheduler.bin",
+        "random_states_0.pkl"
+      ]
+    },
+    {
+      "name": "Stable-Audio-Open-1.0-VAE",
+      "type": "huggingface_model",
+      "repo_id": "stabilityai/stable-audio-open-1.0",
+      "url": "https://huggingface.co/stabilityai/stable-audio-open-1.0",
+      "pinned_revision": "main",
+      "target_subfolder": "vae",
+      "license": "Stability AI Non-Commercial Research Community License",
+      "access_requirements": "Gated / Hugging Face token required (Kaggle Secrets: HF_TOKEN)"
+    },
+    {
+      "name": "Flan-T5-Large",
+      "type": "huggingface_model",
+      "repo_id": "google/flan-t5-large",
+      "url": "https://huggingface.co/google/flan-t5-large",
+      "pinned_revision": "main",
+      "license": "Apache-2.0",
+      "access_requirements": "Public"
+    }
+  ],
+  "datasets": [
+    {
+      "name": "SonicMasterDataset",
+      "type": "huggingface_dataset",
+      "repo_id": "amaai-lab/SonicMasterDataset",
+      "url": "https://huggingface.co/datasets/amaai-lab/SonicMasterDataset",
+      "pinned_revision": "04cc0dd51ff748b41373308d9ee152796c840233",
+      "license": "Research Only",
+      "access_requirements": "Public / Hugging Face datasets",
+      "metadata_format": "Parquet shards (1894) + JSON (1894) + SonicMasterdataset.jsonl",
+      "test_split_specification": "1000 unique audio sources x 7 degradation variants = 7000 test audio snippet pairs (4000 single, 3000 double+triple)"
+    }
+  ],
+  "evaluation_benchmarks": [
+    {
+      "name": "CLAP-Audio-Embedding",
+      "type": "python_package_checkpoint",
+      "library": "laion_clap",
+      "checkpoint": "630k-audioset-best.pt",
+      "license": "MIT",
+      "access_requirements": "Public"
+    },
+    {
+      "name": "Audiobox-Aesthetics",
+      "type": "huggingface_model",
+      "repo_id": "facebook/audiobox-aesthetics",
+      "license": "CC-BY-NC 4.0",
+      "access_requirements": "Public"
+    }
+  ],
+  "environment": {
+    "recommended_python": "3.11 - 3.13",
+    "primary_libraries": {
+      "torch": ">=2.4.0",
+      "torchaudio": ">=2.4.0",
+      "diffusers": ">=0.30.0",
+      "transformers": ">=4.44.0",
+      "accelerate": ">=0.34.2",
+      "datasets": ">=2.21.0",
+      "librosa": ">=0.11.0",
+      "laion_clap": ">=1.1.7"
+    }
+  }
+}

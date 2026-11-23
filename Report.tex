@@ -1,0 +1,188 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\usepackage{amsmath,booktabs,longtable,array,graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
+\usepackage{enumitem}
+\setlist{nosep,leftmargin=*}
+\renewcommand{\arraystretch}{1.14}
+\setlength{\emergencystretch}{2em}
+\title{Báo cáo tuần -- Nhóm 8\\[0.4em]\large Tái lập SonicMaster và các thí nghiệm kiểm chứng}
+\author{Nguyễn Thái Bảo (25125051) \and Ngô Thảo Anh (25125003) \and Lê Quang Nhật (25125047)}
+\date{Ngày 9 tháng 11 năm 2026}
+\begin{document}
+\maketitle
+\begin{abstract}
+Báo cáo tổng hợp các công việc đã thực hiện với SonicMaster: chạy suy luận và đánh giá trên 1.400 mẫu kiểm tra chính thức, đối chiếu ba bảng kết quả của bài báo, kiểm tra sự khác biệt ở metric clipping, ghi nhận quan sát nghe, thử nghiệm xử lý toàn bài và vùng nối, cùng pilot trộn tín hiệu và bổ sung phần dư VAE (VRG). Trên tập 1.400 mẫu, SonicMaster cải thiện KL, FAD-CLAP và Audiobox PQ so với input khi gộp toàn tập, nhưng Mel-SSIM thấp hơn input. Kết quả của nhóm gần bài báo ở KL, SSIM và PQ, trong khi FAD lệch rõ; số clipping chưa thể so sánh trực tiếp vì khác quy ước tính chưa được giải quyết hoàn toàn. Pilot vùng nối không phát hiện sai số loudness cao hơn vùng đối chứng theo tiêu chí đã khóa, nhưng ghi nhận vấn đề lệch timeline và âm lượng toàn bài. VRG residual không đạt điều kiện chọn trên validation; phép blend 10\% input tăng SSIM nhưng giảm PQ và tăng KL. Hướng B1 chuyển phần hiệu chỉnh phổ của SonicMaster về input gốc đang được kiểm tra; chưa có kết quả đầy đủ để kết luận. Các kết quả này là reproduction trên tập con và phân tích thăm dò, chưa chứng minh một phương pháp cải tiến có chất lượng nghe tốt hơn.
+\end{abstract}
+
+\section{Mục tiêu và phạm vi}
+SonicMaster là mô hình phục hồi và hoàn thiện âm thanh nhạc theo hướng dẫn bằng chữ, hướng tới 19 loại lỗi thuộc năm nhóm: cân bằng dải tần (EQ), độ nén/độ mạnh của âm (dynamics), tiếng vang (reverb), âm lượng (amplitude) và âm thanh trái--phải (stereo) \cite{sonicmaster}. Công việc của nhóm gồm năm hạng mục: (1) chạy lại mô hình và cách chấm điểm từ mã, trọng số đã công bố; (2) ghi nhận các quan sát từ số đo và nghe; (3) kiểm tra xử lý nhiều đoạn trong một bài; (4) thử VRG residual và blend để giữ chi tiết; (5) kiểm tra hướng B1. Nhóm \emph{không} huấn luyện lại mô hình, không chạy đủ 7.000 mẫu hay toàn bộ phương pháp đối chứng và thí nghiệm nghe của bài báo. Kết quả các thí nghiệm nhỏ không được gộp vào điểm tái lập chính.
+
+\section{Hạng mục 1: Chạy lại và đánh giá mô hình trên 1.400 mẫu}
+\subsection{Thiết kế và kiểm tra dữ liệu}
+Từ tập kiểm tra chính thức, nhóm dùng 200 nguồn nhạc, mỗi nguồn bảy biến thể suy giảm: bốn lỗi đơn, hai lỗi đôi và một lỗi ba; tổng cộng 800/400/200 mẫu. Bốn notebook Kaggle \texttt{aajayagh/sonicmaster-1400-infer-1..4} xử lý mỗi notebook 350 mẫu. Cấu hình được khóa: commit \texttt{ab32b2d}, seed 0, Euler 10 bước, guidance 1, tính toán float32, \texttt{vae\_mode=mode}; WAV đầu ra stereo 44,1 kHz PCM16, khoảng 30 giây. Bản clean là âm thanh sạch dùng làm tham chiếu; input là bản bị tạo lỗi; VAE là input chỉ qua bước mã hóa rồi giải mã; SonicMaster là bản đã được mô hình xử lý. Cả 1.400 ID đều có kết quả; inventory ghi 5.600 WAV của bốn nhánh và không có ID trùng/thiếu \cite{runreport}. Sau đó, 1.400 output WAV SonicMaster đã được tải riêng và đối chiếu SHA-256 từng file với inventory. Tập này là \emph{một phần} của 7.000 mẫu bài báo, nên độ gần số học chưa phải kiểm định tái lập tương đương.
+
+\subsection{Các metric và cách đọc}
+KL đo độ lệch đặc trưng âm thanh so với bản sạch; FAD so độ khác biệt giữa cả tập âm thanh với tập sạch. Hai chỉ số này càng thấp càng tốt. Mel-SSIM đo độ giống cấu trúc phổ theo thời gian, còn PQ là điểm chất lượng do mô hình Audiobox dự đoán; hai chỉ số này càng cao càng tốt. KL trong bảng được nhân 1.000 để dễ đọc; đây chỉ là đổi cách hiển thị, không đổi thứ tự tốt/xấu. Mỗi thuộc tính EQ, vang, nén, âm lượng hay stereo chỉ được chấm trên những mẫu thực sự có loại lỗi đó; số mẫu được ghi là $N$. PQ và FAD không thay thế đánh giá nghe; SSIM cao hơn cũng không bảo đảm sửa lỗi tốt hơn. Các bảng dưới là điểm trung bình hoặc FAD tính trên toàn nhóm, không lấy trung bình FAD của bốn phần chạy trên Kaggle \cite{tables,runreport}.
+
+\begin{table}[ht]
+\centering\small
+\caption{Table 3 của paper: hàng \emph{All}, so với reproduction 1.400 mẫu. $\mathrm{R}$ là nhóm; $\mathrm{P}$ là paper.}
+\begin{tabular}{llrrrr}
+\toprule
+Metric & Nhánh & Input P/R & VAE P/R & SonicMaster P & SonicMaster R\\
+\midrule
+FAD $\downarrow$ & All & 0.106/0.151 & 0.196/0.247 & 0.073 & 0.109\\
+KL$\times1000\downarrow$ & All & 5.131/5.193 & 5.273/5.317 & 0.888 & 0.887\\
+SSIM $\uparrow$ & All & 0.777/0.779 & 0.546/0.548 & 0.609 & 0.611\\
+PQ $\uparrow$ & All & 7.026/7.022 & 6.885/6.874 & 7.705 & 7.694\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering\small
+\caption{FAD-CLAP và PQ reproduction theo mức suy giảm; các số gốc nằm trong artifact FAD/PQ \cite{runreport}.}
+\begin{tabular}{llrrrr}
+\toprule
+Nhóm & Metric & Input & VAE & SonicMaster & Paper SM\\
+\midrule
+Single & FAD$\downarrow$ & 0.100944 & 0.186470 & 0.104824 & 0.069\\
+Single & PQ$\uparrow$ & 7.339644 & 7.179219 & 7.731483 & 7.743\\
+Double+Triple & FAD$\downarrow$ & 0.242771 & 0.354734 & 0.123558 & 0.082\\
+Double+Triple & PQ$\uparrow$ & 6.597549 & 6.465913 & 7.643610 & 7.654\\
+All & FAD$\downarrow$ & 0.150533 & 0.246570 & 0.109114 & 0.073\\
+All & PQ$\uparrow$ & 7.021603 & 6.873516 & 7.693823 & 7.705\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Kết quả All cho thấy KL giảm từ 5.192990 ở input còn 0.886757 ở SonicMaster, FAD giảm từ 0.150533 còn 0.109114, PQ tăng từ 7.021603 lên 7.693823. SSIM của SonicMaster là 0.611359, cao hơn VAE (0.547511) nhưng thấp hơn input (0.779314); điều này cũng gần xu hướng trong paper. Riêng nhóm Single, FAD SonicMaster \emph{cao hơn} input (0.104824 so với 0.100944), và paper cũng báo cùng chiều (0.069 so với 0.061). FAD All của nhóm cao hơn paper (0.109114 so với 0.073); input và VAE của nhóm cũng cao hơn paper, nên không quy toàn bộ chênh lệch cho mô hình. Chưa kiểm soát riêng ảnh hưởng của cỡ tập, thành phần nguồn và chi tiết giao thức embedding \cite{tables}.
+
+\subsection{Đối chiếu Tables 1 và 2 của paper}
+Trên những mẫu mang nhãn từng thuộc tính, sai số trung bình SonicMaster giảm so với input ở cả 19 thuộc tính đã chấm. Bảng \ref{tab:attributes} chọn một số thuộc tính minh họa; bảng đầy đủ Input/VAE/SonicMaster và số paper nằm trong \texttt{BAO\_CAO\_REPRODUCE\_TABLES\_1\_2\_3.md} \cite{tables}. Các số paper và reproduction không dùng chung tập mẫu.
+\begin{table}[ht]
+\centering\small
+\caption{Ví dụ sai số thuộc tính, nhỏ hơn tốt hơn. N là số mẫu có nhãn trong tập 1.400.}
+\label{tab:attributes}
+\begin{tabular}{llrrrr}
+\toprule
+Nhóm & Thuộc tính & N & Input R & SonicMaster R & SonicMaster P\\
+\midrule
+EQ & boom & 56 & 0.331241 & 0.082983 & 0.0834\\
+EQ & mic & 109 & 0.290474 & 0.022640 & 0.0088\\
+EQ & mud & 86 & 0.485108 & 0.048983 & 0.0388\\
+Reverb & real & 223 & 0.535776 & 0.354398 & 0.3109\\
+Dynamics & comp & 247 & 0.046009 & 0.019328 & 0.0193\\
+Amplitude & volume & 92 & 0.170263 & 0.057074 & 0.0468\\
+Stereo & stereo & 201 & 0.389798 & 0.098102 & 0.1058\\
+\bottomrule
+\end{tabular}
+\end{table}
+Một số điểm như boom/comp gần paper; mic, real và volume còn lệch. Không suy ra nguyên nhân của chênh lệch từ bảng tổng hợp. Trong 2.200 cặp mẫu--thuộc tính mục tiêu, 256 cặp (thuộc 234 mẫu) có sai số \emph{tăng} so với input với ngưỡng $>0$; đây là \emph{ứng viên} để nghe/kiểm chứng, không phải tỷ lệ failure nghe được. Ngoài ra 1.175/1.400 mẫu có SSIM thấp hơn input; riêng điều này cũng không chứng minh chất lượng cảm nhận giảm \cite{runreport}.
+
+\subsection{Kiểm toán metric clipping}
+Table 2 của paper báo clipping$\times1000$ lần lượt 5.122/3.871/1.506 cho input/VAE/SonicMaster. Evaluator upstream trên 211 mẫu mang nhãn clipping cho 0.010771/0.010298/0.001394, khác thang rất lớn. Nhóm giữ nguyên kết quả benchmark và thử một \emph{diagnostic} dùng \texttt{power=1} cho spectral flatness trên cùng 211 mẫu: 3.463703/3.162535/0.228177. Việc đổi quy ước làm số SonicMaster tăng khoảng 164 lần nhưng vẫn thấp hơn paper khoảng 6,6 lần. Audit bổ sung kiểm frame MAE, silence và 12 mẫu smoke cũng chưa giải thích hết chênh lệch. Chưa biết chính xác môi trường/evaluator sinh Table 2; không chọn công thức để khớp paper và không tuyên bố vượt paper về clipping \cite{clipaudit}.
+
+\section{Hạng mục 2: Quan sát sau reproduction và giới hạn do tác giả báo cáo}
+\subsection{Quan sát từ nghe và metric}
+Một người nghe đã nhận xét 7/8 ví dụ được chọn có chủ đích; chưa nghe mù và chưa cân bằng âm lượng. Ở \texttt{1283374\_deg2}, SonicMaster tăng âm lượng gần clean nhưng giọng còn gãy/vỡ. Ở \texttt{1577531\_deg1}, output gần clean nhưng tiếng gõ yếu hơn. Ở \texttt{1909745\_deg6}, tiếng vang còn dư; \texttt{1640646\_deg6} còn rè/sạn ở âm gõ. \texttt{1811880\_deg5} được nghe khá sát clean, còn \texttt{1115233\_deg5} không nhận thấy khác biệt. \texttt{792131\_deg2} có phần nhạc ngân mượt hơn input nhưng output nhỏ nên khó so sánh. Đây là quan sát mô tả, không quy được lỗi là artifact mới của mô hình hay suy giảm chưa sửa hết, cũng không ước lượng tần suất trên toàn tập \cite{failure}.
+
+\subsection{Những giới hạn tác giả tự nêu}
+Phụ lục A.10 của paper \cite{sonicmaster} nêu: (i) dữ liệu chủ yếu là nhạc văn hóa phương Tây; (ii) suy giảm mô phỏng và số lựa chọn amplitude/stereo còn hạn chế, cần thêm dữ liệu thật, thể loại, nhạc cụ và artifact; (iii) ngôn ngữ hướng dẫn có giới hạn, đặc biệt thuật ngữ chuyên môn và sắc thái nghĩa; (iv) mastering chưa bao gồm sự nhất quán giữa các bài trong album và đích xuất theo định dạng; (v) 19 chức năng chưa bao phủ mọi tác vụ, ví dụ panning từng nhạc cụ; (vi) latent audio có thể tạo artifact như giọng robot hoặc giảm độ rõ ở nhạc dày; (vii) nối các đoạn lúc inference chưa tối ưu, đôi khi âm lượng không nhất quán theo thời gian. Các điểm (vi)--(vii) trực tiếp gợi ý kiểm tra bảo toàn chi tiết và vùng nối/toàn bài; đây là \emph{động cơ thí nghiệm}, không phải bằng chứng nhóm đã xác nhận mọi giới hạn ấy.
+
+\subsection{Observation, câu hỏi và kế hoạch kiểm chứng}
+Các quan sát dưới đây xuất phát từ reproduction hoặc giới hạn tác giả nêu. Mỗi dòng phân biệt \emph{đã đo được gì} với \emph{điều còn phải kiểm chứng}; chúng không phải các failure case đã được xác nhận trên toàn tập. Các phép thử VRG và nối đoạn ở phần sau là những bước đầu kiểm chứng hai hướng cuối.
+\begin{enumerate}
+\item \textbf{FAD nhóm Single tăng nhẹ, dù All cải thiện.} Đã thấy $0.100944\to0.104824$ trong reproduction; paper cũng cùng chiều $0.061\to0.069$. \emph{Cần kiểm:} cohort Single đủ lớn, cùng giao thức crop/embedding, so theo nguồn và nghe mù input--output--clean để biết chất lượng cảm nhận có giảm không.
+\item \textbf{SSIM output thấp hơn input ở 1.175/1.400 mẫu, dù KL/PQ All cải thiện.} Đã đối chiếu với bảy nhận xét nghe và pilot blend: đưa input vào làm SSIM tăng nhưng PQ/KL xấu hơn. \emph{Cần kiểm:} cohort độc lập, phân tầng theo suy giảm, cân loudness rồi so SSIM với phiếu nghe có mã trial.
+\item \textbf{VAE roundtrip làm SSIM/PQ thấp và FAD/KL cao hơn input.} VRG residual $s+\lambda(x-r)$ không qua validation; chưa chứng minh VAE là nguyên nhân riêng của artifact. \emph{Cần kiểm:} ablation input--VAE--SM cùng loudness/timing, phân tích onset/giọng hát trên mẫu được nghe mù và so với blend trên tập test mới.
+\item \textbf{234 mẫu có ít nhất một target error xấu hơn; một số ví dụ nghe còn giọng gãy, tiếng gõ yếu/rè, reverb dư.} Đã lập danh sách 256/2.200 cặp metric và đối chiếu bảy nhận xét từ một người. \emph{Cần kiểm:} chọn ngẫu nhiên cả ca tốt/xấu, nghe mù nhiều người, đánh dấu lỗi đã có trong input và lỗi mới ở output trước khi tính tần suất.
+\item \textbf{Clipping$\times1000$ lệch rất lớn so với paper.} Audit 211 mẫu với $\mathrm{power}=1$ giải thích một phần nhưng chưa hết. \emph{Cần kiểm:} evaluator/môi trường sinh Table 2, cùng dữ liệu và sample support, tham số spectral-flatness và phiên bản thư viện.
+\item \textbf{Tác giả nêu nối đoạn có thể làm âm lượng không nhất quán.} Pilot 12 bài phát hiện drift timeline và chênh loudness toàn bài; endpoint overlap--control có $D<0$ ở cả 12 bài. \emph{Cần kiểm:} hoàn thành nghe mù vùng nối/control rồi mới quyết định có thử cohort đa suy giảm hay phương pháp ghép khác.
+\item \textbf{PQ toàn bài giảm dù âm lượng đã được xử lý.} Đối chứng tránh hard clipping cùng gain tăng PQ $0.021579$; tại $-18$ LUFS, SonicMaster vẫn kém gain-only $0.189945$ điểm. \emph{Cần kiểm:} nghe mù gain-only và SonicMaster cùng mức; muốn quy cơ chế cần ablation VAE, inference và export trên cohort độc lập.
+\end{enumerate}
+
+\section{Hạng mục 3: Pilot xử lý toàn bài và vùng nối}
+\subsection{Thiết kế}
+Pilot dùng 12 bài demo của tác giả, tạo input bằng giảm gain còn $0.25$ rồi yêu cầu \emph{Normalize the audio volume}; đây chỉ là tình huống amplitude tổng hợp, không đại diện đầy đủ 19 suy giảm. Nhóm chạy hai lịch chia (gốc và dịch 5 s), tổng 24 lịch/300 chunk, với chunk 30 s, overlap 10 s, stride 20 s. Kết quả này tách khỏi benchmark 1.400 đoạn 30 s \cite{join}. Mỗi vùng overlap được so với vùng control cùng bài/lịch có loudness clean và số onset gần nhau; bootstrap theo 12 nguồn, không coi các cửa sổ chồng lấn là mẫu độc lập.
+
+\subsection{Kết quả và diễn giải}
+Một chunk input 1.323.000 frame nhưng decoded chỉ 1.320.960 frame, thiếu 2.040 frame (46,259 ms). Ghép theo độ dài decoded làm mốc đầu chunk trôi; ở chunk cuối, độ trôi đo được 0,231--0,740 s và output gốc dài dư 10,253--27,981 s. Nhóm tạo bản \emph{anchored} đặt chunk theo mốc input và chuẩn hóa trọng số crossfade để phân tích; không thay file benchmark gốc. Do timing/phase chưa chắc chính xác tuyệt đối, nhóm không chấm waveform SDR/SSIM toàn bài như một số benchmark \cite{join}.
+
+Endpoint đã khóa là $D=$ sai số loudness tuyệt đối ở vùng overlap trừ vùng control tương đồng; $D>0$ nghĩa vùng nối sai hơn. Với SonicMaster, $D=-0.448$ LU (CI95\% $[-0.560,-0.351]$) ở lịch gốc và $-0.486$ LU ở lịch dịch; cả hai lịch đều 0/12 bài có $D>0$. Vì thế không có bằng chứng cho \emph{giả thuyết cụ thể} rằng vùng nối sai loudness hơn vùng control; không suy ra không có biến thiên hay không có lỗi nghe được. Crossfade còn gây giảm năng lượng hỗn hợp khoảng 0,44 dB ở giữa overlap \cite{join}.
+
+Trên toàn bài, SonicMaster lớn hơn clean trung bình 4,895 LU; output float có trung bình 0,8214\% sample-channel vượt $[-1,1]$ trước khi xuất PCM. PQ toàn bài của SonicMaster thấp hơn input ở 11/12 bài (trung bình chênh $-0.2225$ điểm ở lịch gốc), nhưng phép đo này có thể chịu ảnh hưởng của âm lượng, clamp khi xuất và các bước khác. Người dùng ở bộ nghe smoke chủ yếu nhận thấy khác biệt âm lượng; bộ nghe đủ 12 bài chưa có phiếu hoàn chỉnh. Pilot này chưa xác nhận lỗi nối bằng tai \cite{join}.
+
+Đối chứng tiếp theo trên cùng 12 bài cho thấy tránh hard clipping khi so ở cùng gain làm PQ tăng $0.021579$; sau đưa input và SonicMaster về $-18$ LUFS, PQ của SonicMaster vẫn thấp hơn đối chứng input chỉ chỉnh gain $0.189945$ điểm. Đây là phân tích sau quan sát trên dữ liệu demo; mức $-18$ LUFS chỉ là mức thử, và chưa quy phần chênh PQ còn lại cho thành phần cụ thể nào \cite{level}.
+
+\section{Hạng mục 4: Pilot VRG residual và blend}
+\subsection{Giả thuyết, thiết kế}
+Tác giả nêu khả năng mất chi tiết ở latent audio. Nhóm thử biến đổi \emph{sau inference} ở miền waveform, không huấn luyện mô hình mới: với input $x$, VAE reconstruction $r$, output SonicMaster $s$,
+\begin{equation}
+y_{\mathrm{residual}}=s+\lambda(x-r),\qquad
+y_{\mathrm{blend}}=(1-\alpha)s+\alpha x.
+\end{equation}
+Residual đưa một phần chênh input--VAE vào output, còn blend là đối chứng trộn thẳng input. Hệ số được khảo sát trên 280 mẫu validation/40 nguồn, sau đó khóa một phương án và kiểm 140 mẫu confirmation/20 nguồn khác; hai cohort này không trùng 1.400 mẫu reproduction. Grid: 0, 0,1, 0,25, 0,5, 0,75, 1. Mỗi nguồn có bảy biến thể; bootstrap theo nguồn, không coi 280 hay 140 biến thể là nguồn độc lập \cite{vrg}.
+
+\subsection{Kết quả validation và confirmation}
+Residual $\lambda=0.1$ tăng SSIM $+0.009759$ nhưng dưới ngưỡng chọn $+0.01$. Residual $0.25$ tăng SSIM $+0.026665$ nhưng làm sai số thuộc tính dark xấu đi quá guard; các hệ số lớn hơn cũng vi phạm guard khác. Do đó \emph{không có hệ số residual nào qua validation}. Blend $\alpha=0.1$ (90\% SonicMaster + 10\% input) qua các ngưỡng pilot đã khóa và được thử trên confirmation \cite{vrg}.
+
+\begin{table}[ht]
+\centering\small
+\caption{Blend 0,1 trừ SonicMaster trên cùng mẫu của từng pilot. Dấu tốt: SSIM/PQ cao; KL/FAD thấp. FAD dùng crop 10 s và không cùng protocol FAD reproduction.}
+\begin{tabular}{lrr}
+\toprule
+Chỉ số & Validation (280 mẫu) & Confirmation (140 mẫu)\\
+\midrule
+$\Delta$SSIM & +0.012990 & +0.012463\\
+$\Delta$KL$\times1000$ & +0.014924 & +0.054499\\
+$\Delta$PQ & $-0.016855$ & $-0.013567$\\
+$\Delta$FAD All & +0.001172 & $-0.000570$\\
+$\Delta$FAD Single & $-0.002762$ & $-0.004237$\\
+$\Delta$FAD Double+Triple & +0.007297 & +0.004768\\
+\bottomrule
+\end{tabular}
+\end{table}
+Trên confirmation, SSIM tăng từ 0.625201 lên 0.637663, nhưng KL tăng từ 0.915931 lên 0.970430 và PQ giảm từ 7.743102 xuống 7.729534. Blend qua tiêu chí vận hành pilot, song đó là \emph{đánh đổi}, không chứng minh chất lượng tổng thể hay chất lượng nghe tăng. Kiểm chứng bổ sung thấy SSIM tăng cả trước và sau xuất PCM; sau cân loudness, $\Delta$PQ vẫn âm ($-0.016597$, CI95\% $[-0.032911,-0.002653]$). CI của FAD All chứa 0 trong cả hai cohort; chưa có bằng chứng ổn định về cải thiện FAD toàn nhóm \cite{followup}. Thuộc tính mud confirmation xấu đi chuẩn hóa 0.114022 nhưng chỉ có 5 mẫu/5 nguồn, không đủ ngưỡng guard riêng; cần giữ như một tín hiệu cần kiểm tra thêm. Bộ nghe mù 12 mẫu VRG đã chuẩn bị nhưng chưa có đánh giá người nghe \cite{vrg}.
+
+\section{Hạng mục 5: Hướng B1 đang được kiểm tra}
+Nhóm đang thử B1, một phép xử lý \emph{sau} SonicMaster và không huấn luyện lại mô hình. Động cơ là Mel-SSIM giảm khoảng 0,232 khi input đi qua VAE, trong khi bước SonicMaster tăng lại khoảng 0,064 so với VAE trên tập 1.400 mẫu. Đây là phân rã của \emph{metric} Mel-SSIM, chưa đủ để kết luận phần lớn suy giảm chất lượng nghe do VAE. B1 ước lượng phần chỉnh sửa trong miền phổ từ output SonicMaster so với VAE reconstruction, rồi chuyển phần chỉnh sửa ấy lên input gốc nhằm hạn chế thay đổi do vòng mã hóa--giải mã. Hai biến thể cố định đang thử là B1-0 (chỉ chuyển biên độ, giữ pha input) và B1-C (chuyển cả biên độ lẫn pha) \cite{b1status}.
+
+Giao thức B1 dự kiến chấm trên cùng 1.400 mẫu với các đối chứng input, VAE, SonicMaster, blend và residual đã thử. Các phép đo gồm KL, Mel-SSIM, PQ, FAD-CLAP, sai khác phổ và 19 thuộc tính mục tiêu; tiêu chí đánh giá được khóa trước khi xem kết quả B1 đầy đủ. Các biến thể có tham số chỉ được chọn trên validation riêng trước khi chấm test. Theo báo cáo tiến độ nội bộ lúc \textbf{10:20 ngày 09/11/2026}, B1-0/B1-C đã xử lý 371/1.400 mẫu, còn quá trình chọn tham số ở 30/150 lượt thử. Đây là \emph{mốc tiến độ được báo lại}, chưa phải kết quả cuối; nhóm không lấy số từ phần chạy dở để kết luận B1 hơn SonicMaster. Bộ nghe đã chuẩn bị nhưng chưa có phiếu đánh giá \cite{b1status}. Kết quả cuối cần kiểm tra đủ mẫu, các đối chứng, thuộc tính mục tiêu và đánh giá nghe trước khi bổ sung vào kết luận nghiên cứu.
+
+\section{Kết luận}
+\begin{enumerate}
+\item Nhóm đã tái lập \emph{hàng Input/VAE/SonicMaster trên tập snippet 1.400 mẫu} và chấm các metric chính; chưa tái lập toàn bộ ba bảng theo nghĩa gồm tất cả baseline, full-song và 7.000 mẫu. KL, SSIM và PQ tổng thể gần số paper, FAD cao hơn rõ; xu hướng cải thiện KL/FAD/PQ so với input được giữ trên toàn tập. SSIM của output thấp hơn input và FAD nhóm Single tăng nhẹ so với input, phù hợp với việc không nên kết luận mọi mẫu/nhóm đều tốt hơn.
+\item Audit clipping xác nhận kết quả phụ thuộc mạnh quy ước tính nhưng chưa giải thích được toàn bộ chênh lệch với paper; không thể dùng số clipping để tuyên bố vượt tác giả.
+\item Pilot toàn bài phát hiện sai lệch timeline khi ghép theo độ dài decoded và chênh loudness toàn bài; endpoint so overlap với control không ủng hộ giả thuyết vùng nối tệ hơn theo loudness. Chưa có xác nhận nghe cho đủ 12 bài.
+\item VRG residual không qua validation. Blend 0,1 tăng SSIM nhưng làm KL/PQ xấu hơn và FAD theo nhóm không nhất quán; hiện chưa có bằng chứng để đề xuất nó thay SonicMaster.
+\item B1 là hướng kiểm tra bổ sung đang chạy; chưa có bảng kết quả đủ 1.400 mẫu và chưa thể kết luận hiệu quả.
+\end{enumerate}
+
+\section{Thắc mắc và việc chưa kịp làm}
+\begin{enumerate}
+\item \textbf{Khả năng so với paper:} chưa có evaluator và môi trường chính xác sinh Table 2 clipping; cần xác minh quy ước phổ, tiền xử lý, tập mẫu và phiên bản thư viện. Chênh FAD với paper cần thiết kế so sánh kiểm soát tập/crop/embedding, không suy nguyên nhân từ số tổng hợp.
+\item \textbf{Đánh giá nghe:} chưa có phiếu mù, cân bằng loudness và nhiều người nghe cho bộ VRG và đủ 12 bài nối đoạn. Bảy ví dụ reproduction chỉ là thăm dò; chưa tính tỷ lệ failure nghe được hay khẳng định artifact mới do mô hình.
+\item \textbf{Tính đại diện:} còn 5.600 mẫu test khác nếu muốn đi tới 7.000; chưa chạy lại baseline chuyên biệt, training, ablation hay kiểm tra âm nhạc ngoài phân bố văn hóa/dữ liệu của paper. Các pilot VRG và full-song dùng cohort riêng, không được cộng vào 1.400.
+\item \textbf{Cơ chế và cải tiến:} chưa tách định lượng ảnh hưởng của VAE, backbone, loudness và bước xuất PCM đối với artifact cảm nhận; chưa có can thiệp \emph{trước} SonicMaster, mô hình mới hay kết quả trên cùng 1.400 mẫu cho VRG. Nếu mở nghiên cứu mới, cần đặt giả thuyết cụ thể, khóa metric/đối chứng và dùng tập xác nhận độc lập mới.
+\item \textbf{Hướng B1:} chờ chạy đủ 1.400 mẫu và hoàn tất kiểm tra kỹ thuật, đối chứng, khoảng tin cậy và nghe. Tiến độ 371 mẫu chỉ phản ánh trạng thái tại mốc báo cáo, không dùng để chọn phương án hay tuyên bố cải thiện.
+\end{enumerate}
+
+\renewcommand{\refname}{Tài liệu và dữ liệu đối chiếu}
+\begin{thebibliography}{9}\small
+\bibitem{sonicmaster} J. Melechovsky, A. Mehrish, A. Roy và D. Herremans, \emph{SonicMaster: Towards Controllable All-in-One Music Restoration and Mastering}, bản PDF \texttt{melechovsky26a.pdf}, đặc biệt Tables 1--3 và Phụ lục A.10.
+\bibitem{runreport} \texttt{artifacts/07\_run1400/evaluation/REPORT\_VI.md}; \texttt{summary.csv}, \texttt{per\_sample.csv}, \texttt{fad\_pq/fad\_clap.json} và \texttt{audiobox\_pq\_summary.json}.
+\bibitem{tables} \texttt{BAO\_CAO\_REPRODUCE\_TABLES\_1\_2\_3.md}.
+\bibitem{clipaudit} \texttt{CLIP\_AUDIT\_REPORT\_V2.md}; \texttt{artifacts/08\_clip\_audit\_v2/}.
+\bibitem{failure} \texttt{artifacts/07\_run1400/evaluation/FAILURE\_ANALYSIS\_VI.md}.
+\bibitem{join} \texttt{JOIN\_PILOT\_REPORT.md}; \texttt{artifacts/09\_join\_pilot/}.
+\bibitem{level} \texttt{LEVEL\_EXPORT\_CONTROLS\_REPORT.md}; \texttt{artifacts/11\_level\_export\_controls/}.
+\bibitem{vrg} \texttt{VRG\_PILOT\_REPORT.md}; \texttt{artifacts/10\_vrg\_pilot/}.
+\bibitem{followup} \texttt{VERIFICATION\_FOLLOWUP\_REPORT.md}; \texttt{artifacts/12\_vrg\_followup\_checks/}.
+\bibitem{b1status} Báo cáo tiến độ B1 nội bộ của nhóm, cập nhật 10:20 ngày 09/11/2026; nhánh \texttt{research-v5-panel}, commit \texttt{d5fd627}. Các trạng thái đang chạy chưa được báo cáo này kiểm toán độc lập.
+\end{thebibliography}
+\end{document}

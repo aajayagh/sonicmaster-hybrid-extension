@@ -1,0 +1,159 @@
+{
+  "cand_name": "v4_4",
+  "violations": [
+    "bright",
+    "stereo"
+  ],
+  "attributes": [
+    {
+      "attribute": "airy",
+      "n": 6,
+      "input_err": 0.003990964871776116,
+      "A0_err": 0.0016672291831562609,
+      "v4_4_err": 0.0012747410378397585,
+      "norm_deterioration": -0.09834417438553693,
+      "guard_eligible": false,
+      "guard_ok": true
+    },
+    {
+      "attribute": "boom",
+      "n": 13,
+      "input_err": 0.4055874346389579,
+      "A0_err": 0.07259326906106504,
+      "v4_4_err": 0.061407210497379947,
+      "norm_deterioration": -0.02757989426778618,
+      "guard_eligible": true,
+      "guard_ok": true
+    },
+    {
+      "attribute": "bright",
+      "n": 19,
+      "input_err": 0.009975698604843373,
+      "A0_err": 0.006125614867385648,
+      "v4_4_err": 0.007476321511314744,
+      "norm_deterioration": 0.13539970456538297,
+      "guard_eligible": true,
+      "guard_ok": false
+    },
+    {
+      "attribute": "clarity",
+      "n": 8,
+      "input_err": 0.03622937621889457,
+      "A0_err": 0.012304134301084612,
+      "v4_4_err": 0.011338505861483404,
+      "norm_deterioration": -0.02665318976973186,
+      "guard_eligible": false,
+      "guard_ok": true
+    },
+    {
+      "attribute": "clip",
+      "n": 48,
+      "input_err": 2.5119868391033537e-06,
+      "A0_err": 1.65906244740018e-07,
+      "v4_4_err": 9.30381422360969e-08,
+      "norm_deterioration": -0.029008154568967073,
+      "guard_eligible": true,
+      "guard_ok": true
+    },
+    {
+      "attribute": "comp",
+      "n": 51,
+      "input_err": 0.04719921119692849,
+      "A0_err": 0.024880184664153586,
+      "v4_4_err": 0.021341511687519504,
+      "norm_deterioration": -0.07497313804397568,
+      "guard_eligible": true,
+      "guard_ok": true
+    },
+    {
+      "attribute": "dark",
+      "n": 14,
+      "input_err": 0.08721543605414389,
+      "A0_err": 0.007250036913402054,
+      "v4_4_err": 0.008230565512128566,
+      "norm_deterioration": 0.011242603867941372,
+      "guard_eligible": true,
+      "guard_ok": true
+    },
+    {
+      "attribute": "mic",
+      "n": 26,
+      "input_err": 0.3327025175998046,
+      "A0_err": 0.010999901188365878,
+      "v4_4_err": 0.013919229158355724,
+      "norm_deterioration": 0.008774589357034552,
+      "guard_eligible": true,
+      "guard_ok": true
+    },
+    {
+      "attribute": "mud",
+      "n": 14,
+      "input_err": 0.4263681262290079,
+      "A0_err": 0.053845105562247524,
+      "v4_4_err": 0.05424747549691102,
+      "norm_deterioration": 0.0009437148555691541,
+      "guard_eligible": true,
+      "guard_ok": true
+    },
+    {
+      "attribute": "punch",
+      "n": 20,
+      "input_err": 0.10653954285841721,
+      "A0_err": 0.0882564514875412,
+      "v4_4_err": 0.07220153510570526,
+      "norm_deterioration": -0.1506944365546197,
+      "guard_eligible": true,
+      "guard_ok": true
+    },
+    {
+      "attribute": "stereo",
+      "n": 40,
+      "input_err": 0.4227231385305272,
+      "A0_err": 0.07342268062911167,
+      "v4_4_err": 0.11310305746524618,
+      "norm_deterioration": 0.09386847612380927,
+      "guard_eligible": true,
+      "guard_ok": false
+    },
+    {
+      "attribute": "vocal",
+      "n": 12,
+      "input_err": 0.24624220670001074,
+      "A0_err": 0.049191443294428046,
+      "v4_4_err": 0.0475255445226862,
+      "norm_deterioration": -0.006765285261479792,
+      "guard_eligible": true,
+      "guard_ok": true
+    },
+    {
+      "attribute": "volume",
+      "n": 22,
+      "input_err": 0.1738124145742725,
+      "A0_err": 0.04656143249435858,
+      "v4_4_err": 0.04692085984755646,
+      "norm_deterioration": 0.0020679038035242747,
+      "guard_eligible": true,
+      "guard_ok": true
+    },
+    {
+      "attribute": "warm",
+      "n": 9,
+      "input_err": 0.44724142517410787,
+      "A0_err": 0.03973860345879174,
+      "v4_4_err": 0.03267197983623738,
+      "norm_deterioration": -0.015800467543460157,
+      "guard_eligible": false,
+      "guard_ok": true
+    },
+    {
+      "attribute": "xband",
+      "n": 32,
+      "input_err": 0.21378165615778488,
+      "A0_err": 0.07292741350100977,
+      "v4_4_err": 0.06735688000148385,
+      "norm_deterioration": -0.0260571164039187,
+      "guard_eligible": true,
+      "guard_ok": true
+    }
+  ]
+}

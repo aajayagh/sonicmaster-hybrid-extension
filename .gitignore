@@ -1,0 +1,58 @@
+# Python & caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Environments, temp, raw data, external repo
+tools/
+tmp/
+data/
+output/
+outputs/
+SonicMaster/
+
+# Heavy binaries, checkpoints, audio, datasets
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.npy
+*.npz
+*.parquet
+*.zip
+*.tar
+*.tar.gz
+
+# Heavy artifacts (keep figures, locks, splits, summaries, histories)
+artifacts/*
+!artifacts/10_extension/
+artifacts/10_extension/*
+!artifacts/10_extension/figures/
+!artifacts/10_extension/lock*.json
+!artifacts/10_extension/v4/
+artifacts/10_extension/v4/*
+!artifacts/10_extension/v4/pilot_splits.json
+!artifacts/10_extension/v4/pilot_dev_eval/
+artifacts/10_extension/v4/pilot_dev_eval/*
+!artifacts/10_extension/v4/pilot_dev_eval/*summary*.json
+!artifacts/10_extension/v4/pilot_dev_eval/*tables123*.json
+
+# LaTeX build junk & personal PDFs/docs if not needed (keep .md & .tex)
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.synctex.gz
+
+# Never commit secrets or tokens
+.env
+*.key
+*.pem
+*token*
+*secret*
+kaggle.json
