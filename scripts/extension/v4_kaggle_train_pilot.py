@@ -207,7 +207,8 @@ for var in variants:
         print(f"[{{var}} Ep {{ep:02d}}/{args.epochs} S{{stage}}] {{dt:.1f}}s tr={{tr_s['l_stft']:.4f}} va={{va_s['l_stft']:.4f}} wav={{va_s['l_wav']:.4f}} clip={{va_s['clip_rate']:.5f}}{{g_info}}", flush=True)
         if va_s["l_stft"] < best_val:
             best_val = va_s["l_stft"]
-            torch.save({{"epoch": ep, "variant": var, "model": model.state_dict(), "val": va_s}}, vdir / "best.pt")
+            torch.save({{"epoch": ep, "variant": var, "model": model.state_dict(), "val": va_s,
+                         "inference_config": {{"hop": 512, "gate_bias_init": {args.gate_bias_init}, "chunk_sec": 8.0}}}}, vdir / "best.pt")
     (vdir / "history.json").write_text(json.dumps(hist, indent=2))
 print("ALL_PILOT_DONE", flush=True)
 '''

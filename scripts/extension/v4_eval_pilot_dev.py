@@ -27,10 +27,11 @@ GDRIVE = Path(r"G:\My Drive\SonicMaster_Reproducing")
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "SonicMaster" / "evaluation"))
 
-from scripts.extension.branch_r import estimate_lag_samples  # noqa: E402
-from scripts.extension.eval_dev import kl_div, logmel, mel_ssim, source_bootstrap_ci  # noqa: E402
+from scripts.extension.v4_alignment import align_teacher_to_input  # noqa: E402
+from scripts.extension.eval_dev import logmel, source_bootstrap_ci  # noqa: E402
+from scripts.extension.v4_clap import matched_embeddings  # noqa: E402
 from scripts.extension.v4_models import HybridV4Net  # noqa: E402
-import evaluate_control_multiple_degs_mass as attr_eval  # noqa: E402
+from scripts.extension.v4_runtime import checkpoint_inference_config, spectral_scores  # noqa: E402
 
 
 def res(p: str | Path) -> Path:
@@ -82,7 +83,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt-root", default=str(ROOT / "artifacts/10_extension/v4/pilot_ckpts"))
     ap.add_argument("--variants", default="v4_0,v4_1,v4_2")
-    ap.add_argument("--chunk-sec", type=float, default=8.0)
+    ap.add_argument("--chunk-sec", type=float)
+    ap.add_argument("--gate-bias-init", type=float)
     ap.add_argument("--from-infer-json", action="store_true")
     ap.add_argument("--out-json", default=str(ROOT / "artifacts" / "10_extension" / "v4" / "pilot_dev_eval" / "pilot_summary.json"))
     args = ap.parse_args()
@@ -110,23 +112,16 @@ def main() -> None:
     clap.load_ckpt()
     predictor = initialize_predictor()
 
-    clean_srcs = sorted(clean_cache.keys())
-    clean_paths = [str(res(next(r["path_clean"] for r in dev_rows if r["source_id"] == s))) for s in clean_srcs]
-    clean_emb_map = {}
-    for i in range(0, len(clean_paths), 8):
-        em = clap.get_audio_embedding_from_filelist(clean_paths[i : i + 8], use_tensor=False)
-        for s, e in zip(clean_srcs[i : i + 8], em):
-            clean_emb_map[s] = e.astype(np.float32)
-    c_embs = np.stack([clean_emb_map[r["source_id"]] for r in dev_rows])
-
-    # Baseline A0 PQ & embeddings
+    frame_counts = [min(clean_cache[r["source_id"]].shape[-1], x_cache[r["sample_id"]].shape[-1],
+                        s_cache[r["sample_id"]].shape[-1]) for r in dev_rows]
+    clean_paths = [str(res(r["path_clean"])) for r in dev_rows]
+    c_embs = matched_embeddings(clap, clean_paths, frame_counts)
     a0_paths = [str(res(r["path_s"])) for r in dev_rows]
-    a0_embs_list, a0_pqs = [], []
+    a0_embs = matched_embeddings(clap, a0_paths, frame_counts)
+    a0_pqs = []
     for i in range(0, len(a0_paths), 8):
         b = a0_paths[i : i + 8]
-        a0_embs_list.append(clap.get_audio_embedding_from_filelist(b, use_tensor=False).astype(np.float32))
         a0_pqs.extend(float(x["PQ"]) for x in predictor.forward([{"path": p} for p in b]))
-    a0_embs = np.concatenate(a0_embs_list, axis=0)
 
     summary_all: dict[str, object] = {
         "A0": {
@@ -144,7 +139,11 @@ def main() -> None:
         out_wav_dir = out_dir / "out_wav"
         if args.from_infer_json:
             meta = json.loads((out_dir / "infer_meta.json").read_text(encoding="utf-8"))
-            per_sample = meta["per_sample"]
+            by_id = {item["sample_id"]: item for item in meta["per_sample"]}
+            manifest_ids = {r["sample_id"] for r in dev_rows}
+            if len(by_id) != len(meta["per_sample"]) or set(by_id) != manifest_ids:
+                raise ValueError("Inference metadata and Dev manifest contain different sample IDs")
+            per_sample = [by_id[r["sample_id"]].copy() for r in dev_rows]
             ckpt = {"epoch": meta["epoch"]}
             g_by_fam = {k: [v] for k, v in meta["g_by_family"].items()}
             t0 = time.time() - float(meta["elapsed_sec"])
@@ -154,7 +153,8 @@ def main() -> None:
                 print(f"Skipping {var}: {ckpt_p} not found", flush=True)
                 continue
             ckpt = torch.load(ckpt_p, map_location="cpu", weights_only=False)
-            model = HybridV4Net(var, hop=512, gate_bias_init=-3.5).to(device)
+            config = checkpoint_inference_config(ckpt, var, args.gate_bias_init, args.chunk_sec)
+            model = HybridV4Net(var, hop=config["hop"], gate_bias_init=config["gate_bias_init"]).to(device)
             model.load_state_dict(ckpt["model"])
             model.eval()
 
@@ -168,32 +168,24 @@ def main() -> None:
                 src = r["source_id"]
                 x_np = x_cache[sid]
                 s_np = s_cache[sid]
-                c_np = clean_cache[src]
-                n = min(x_np.shape[-1], s_np.shape[-1], c_np.shape[-1])
-                x_np, s_np, c_np = x_np[:, :n], s_np[:, :n], c_np[:, :n]
+                n = min(x_np.shape[-1], s_np.shape[-1])
+                x_np, s_np = x_np[:, :n], s_np[:, :n]
 
                 if model.has_teacher:
-                    lag, _ = estimate_lag_samples(x_np.T, s_np.T, max_lag=512)
-                    s_al = np.roll(s_np, -lag, axis=-1) if lag != 0 else s_np
+                    s_al = align_teacher_to_input(x_np, s_np)
                     s_t = torch.from_numpy(s_al).unsqueeze(0).to(device)
                 else:
                     s_t = None
                 x_t = torch.from_numpy(x_np).unsqueeze(0).to(device)
 
                 with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
-                    y_t, diag = model.forward_track(x_t, s_t, chunk_sec=args.chunk_sec, overlap_ratio=0.5)
+                    y_t, diag = model.forward_track(x_t, s_t, chunk_sec=config["chunk_sec"], overlap_ratio=0.5)
 
                 y_np = y_t.squeeze(0).cpu().numpy()
                 clip_rate = float(np.mean(np.abs(y_np) >= 0.999))
                 y_save = np.clip(y_np.T, -1.0, 1.0).astype(np.float32)
                 sf.write(str(out_wav_dir / f"{sid}.wav"), y_save, 44100, subtype="PCM_16")
 
-                cm = c_np.mean(axis=0)
-                ym = y_np.mean(axis=0)
-                mc = logmel(cm)
-                my = logmel(ym)
-                s_val = mel_ssim(mc, my)
-                k_val = kl_div(mc, my) * 1000.0
                 stereo_corr = float(np.corrcoef(y_np[0], y_np[1])[0, 1]) if np.std(y_np[0]) > 1e-8 and np.std(y_np[1]) > 1e-8 else 1.0
 
                 degs = {d.strip() for d in r["degradation_types"].split("|") if d.strip()}
@@ -214,8 +206,6 @@ def main() -> None:
                     "source_id": src,
                     "n_deg": int(r["n_degradations"]),
                     "degs": r["degradation_types"],
-                    "ssim": s_val,
-                    "kl": k_val,
                     "clip_rate": clip_rate,
                     "stereo_corr": stereo_corr,
                     **diag,
@@ -223,12 +213,17 @@ def main() -> None:
 
         # FAD & PQ
         paths = [str(out_wav_dir / f"{r['sample_id']}.wav") for r in dev_rows]
-        embs_list, pqs = [], []
+        for row, path, frames, item in zip(dev_rows, paths, frame_counts, per_sample, strict=True):
+            audio, _ = load_stereo_np(Path(path), frames=frames)
+            if audio.shape[-1] != frames:
+                raise ValueError(f"Exported WAV is shorter than the common evaluation span: {path}")
+            reference = logmel(clean_cache[row["source_id"]][:, :frames].mean(axis=0))
+            item["ssim"], item["kl"] = spectral_scores(reference, audio)
+        v_embs = matched_embeddings(clap, paths, frame_counts)
+        pqs = []
         for i in range(0, len(paths), 8):
             b = paths[i : i + 8]
-            embs_list.append(clap.get_audio_embedding_from_filelist(b, use_tensor=False).astype(np.float32))
             pqs.extend(float(x["PQ"]) for x in predictor.forward([{"path": p} for p in b]))
-        v_embs = np.concatenate(embs_list, axis=0)
 
         for i, it in enumerate(per_sample):
             it["pq"] = pqs[i]

@@ -290,6 +290,8 @@ class MF7Decoder(nn.Module):
         self.mf_offsets = mf_offsets
         self.n_taps_other = len(mf_offsets)
         self.use_additive_residual = use_additive_residual
+        self.residual_scale = 1.0
+        self.residual_sweep: tuple[float, ...] | None = None
 
         self.shared_mlp = nn.Sequential(
             nn.LayerNorm(embed_dim),
@@ -392,6 +394,8 @@ class MF7Decoder(nn.Module):
         dwk_bins = mf_sub[:, :, self.subband_map, :, :]  # (B, T, F, 6, 8)
 
         for tap_idx, k_off in enumerate(self.mf_offsets):
+            if abs(k_off) >= n_frames:
+                continue
             if k_off < 0:
                 pad_l = -k_off
                 z_shifted = F.pad(z_x[..., : n_frames - pad_l], (pad_l, 0))
@@ -403,12 +407,19 @@ class MF7Decoder(nn.Module):
         z_hat = (1.0 - g_ms) * f_w + g_ms * z_s
         if self.use_additive_residual:
             r_ms = torch.stack([torch.cat(r_m_list, dim=1), torch.cat(r_s_list, dim=1)], dim=1)
-            z_hat = z_hat + r_ms
+            if self.residual_sweep is None:
+                z_hat = z_hat + self.residual_scale * r_ms
+            else:
+                if bsz != 1:
+                    raise ValueError("A residual sweep requires one input clip")
+                scales = r_ms.real.new_tensor(self.residual_sweep).view(-1, 1, 1, 1)
+                z_hat = z_hat + scales * r_ms
         diag = {
-            "g_mean_M": g_m.mean().detach(),
-            "g_mean_S": g_s.mean().detach(),
-            "dw0_rms": torch.sqrt(torch.mean(dw0**2) + 1e-12).detach(),
-            "dwk_rms": torch.sqrt(torch.mean(dwk_bins**2) + 1e-12).detach(),
+            # The training loss uses these terms. Convert to scalars at logging time.
+            "g_mean_M": g_m.mean(),
+            "g_mean_S": g_s.mean(),
+            "dw0_rms": torch.sqrt(torch.mean(dw0**2) + 1e-12),
+            "dwk_rms": torch.sqrt(torch.mean(dwk_bins**2) + 1e-12),
         }
         if self.use_additive_residual:
             diag["res_rms"] = torch.sqrt(torch.mean(r_ms.abs() ** 2) + 1e-12).detach()
@@ -518,9 +529,13 @@ class HybridV4Net(nn.Module):
             y_out = y_in * scale
             if self.variant in ("v4_3", "v4_4") and s is not None and not force_identity:
                 rms_s = torch.sqrt(torch.mean(s.float() ** 2) + 1e-12)
-                rms_y = torch.sqrt(torch.mean(y_out.float() ** 2) + 1e-12)
-                if rms_s > 1e-6 and rms_y > 1e-6:
-                    y_out = y_out * (rms_s / rms_y).to(y_out.dtype)
+                if self.decoder.residual_sweep is not None:
+                    rms_y = torch.sqrt(y_out.float().square().mean(dim=(1, 2), keepdim=True) + 1e-12)
+                    y_out = y_out * torch.where((rms_s > 1e-6) & (rms_y > 1e-6), rms_s / rms_y, 1.0)
+                else:
+                    rms_y = torch.sqrt(torch.mean(y_out.float() ** 2) + 1e-12)
+                    if rms_s > 1e-6 and rms_y > 1e-6:
+                        y_out = y_out * (rms_s / rms_y).to(y_out.dtype)
             return y_out, {k: float(v.item()) for k, v in diag.items()}
 
         # Pad by hop_len on both sides (reflect) so Hann OLA sum_w == 1.0 everywhere
@@ -531,7 +546,8 @@ class HybridV4Net(nn.Module):
         total_pad = x_pad.shape[-1]
 
         win = torch.hann_window(chunk_len, periodic=True, device=x.device, dtype=x.dtype)
-        acc = torch.zeros_like(x_pad)
+        sweep = getattr(self.decoder, "residual_sweep", None)
+        acc = torch.zeros_like(x_pad) if sweep is None else x_pad.new_zeros(len(sweep), x_pad.shape[1], total_pad)
         w_sum = torch.zeros((1, 1, total_pad), device=x.device, dtype=x.dtype)
 
         starts = list(range(0, max(1, total_pad - chunk_len + 1), hop_len))
@@ -554,9 +570,13 @@ class HybridV4Net(nn.Module):
         y_out = y_in * scale
         if self.variant in ("v4_3", "v4_4") and s is not None and not force_identity:
             rms_s = torch.sqrt(torch.mean(s.float() ** 2) + 1e-12)
-            rms_y = torch.sqrt(torch.mean(y_out.float() ** 2) + 1e-12)
-            if rms_s > 1e-6 and rms_y > 1e-6:
-                y_out = y_out * (rms_s / rms_y).to(y_out.dtype)
+            if sweep is not None:
+                rms_y = torch.sqrt(y_out.float().square().mean(dim=(1, 2), keepdim=True) + 1e-12)
+                y_out = y_out * torch.where((rms_s > 1e-6) & (rms_y > 1e-6), rms_s / rms_y, 1.0)
+            else:
+                rms_y = torch.sqrt(torch.mean(y_out.float() ** 2) + 1e-12)
+                if rms_s > 1e-6 and rms_y > 1e-6:
+                    y_out = y_out * (rms_s / rms_y).to(y_out.dtype)
         diag_mean = {k: sum(vs) / len(vs) for k, vs in diag_acc.items()}
         return y_out, diag_mean
 

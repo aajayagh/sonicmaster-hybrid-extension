@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 GDRIVE = Path(r"G:\My Drive\SonicMaster_Reproducing")
 sys.path.insert(0, str(ROOT))
 
-from scripts.extension.branch_r import estimate_lag_samples  # noqa: E402
+from scripts.extension.v4_alignment import align_teacher_to_input  # noqa: E402
 from scripts.extension.v4_losses import HybridV4Loss  # noqa: E402
 from scripts.extension.v4_models import HybridV4Net, compute_track_norm  # noqa: E402
 
@@ -45,11 +45,7 @@ def load_stereo_np(path: Path, frames: int = 1320960) -> np.ndarray:
 
 def align_s_to_x(x_np: np.ndarray, s_np: np.ndarray) -> np.ndarray:
     """Integer lag alignment of s to x without reading clean."""
-    lag, _ = estimate_lag_samples(x_np.T, s_np.T, max_lag=512)
-    if lag != 0:
-        # Positive lag means s is delayed relative to x -> shift s left by lag
-        s_np = np.roll(s_np, -lag, axis=-1)
-    return s_np
+    return align_teacher_to_input(x_np, s_np)
 
 
 class V4ChunkDataset(Dataset):
@@ -231,6 +227,7 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     best_val = float("inf")
+    inference_config = {"hop": args.hop, "gate_bias_init": args.gate_bias_init, "chunk_sec": 8.0}
     history = []
 
     print(f"Training {args.variant} ({args.split_mode}: train={len(tr_rows)}, val={len(va_rows)}) on {device}", flush=True)
@@ -254,9 +251,11 @@ def main() -> None:
         )
         if va_stats["l_stft"] < best_val:
             best_val = va_stats["l_stft"]
-            torch.save({"epoch": ep, "variant": args.variant, "model": model.state_dict(), "val": va_stats}, out_dir / "best.pt")
+            torch.save({"epoch": ep, "variant": args.variant, "model": model.state_dict(), "val": va_stats,
+                        "inference_config": inference_config}, out_dir / "best.pt")
 
-    torch.save({"epoch": args.epochs, "variant": args.variant, "model": model.state_dict()}, out_dir / "last.pt")
+    torch.save({"epoch": args.epochs, "variant": args.variant, "model": model.state_dict(),
+                "inference_config": inference_config}, out_dir / "last.pt")
     (out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     print(f"Done! Best val l_stft={best_val:.4f} saved to {out_dir}")
 

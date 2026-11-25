@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 
 import pytest
+import numpy as np
+import soundfile as sf
 import torch
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -19,6 +21,72 @@ from scripts.extension.v4_models import (  # noqa: E402
     ms_to_lr,
     stft_ms,
 )
+from scripts.extension.v4_alignment import align_teacher_to_input
+from scripts.extension.v4_runtime import checkpoint_inference_config, spectral_scores
+from scripts.extension.eval_dev import kl_div, logmel
+
+
+def test_short_v4_4_and_regularizer_gradients():
+    model = HybridV4Net("v4_4", gate_bias_init=-1.5)
+    with torch.no_grad():
+        model.decoder.mf_head.bias.fill_(0.03)
+    x = torch.randn(1, 2, 8192)
+    y, diag = model.forward_normalized(x, x, torch.zeros(1, 3))
+    assert y.shape == x.shape and torch.isfinite(y).all()
+    gate = diag["g_mean_M"] + diag["g_mean_S"]
+    weights = diag["dw0_rms"].square() + diag["dwk_rms"].square()
+    assert gate.requires_grad and weights.requires_grad
+    grads = torch.autograd.grad(gate, tuple(model.decoder.parameters()), allow_unused=True, retain_graph=True)
+    assert any(g is not None and g.abs().max() > 0 for g in grads)
+    (weight_grad,) = torch.autograd.grad(weights, (model.decoder.mf_head.bias,))
+    assert weight_grad.abs().max() > 0
+
+
+def test_staging_crops_all_variants_at_same_offset(tmp_path):
+    from scripts.extension.v4_stage_pilot_kaggle import process_source_group
+
+    rng = np.random.default_rng(2)
+    audio = rng.normal(0, .1, (230000, 2)).astype(np.float32)
+    n_short = 200000
+    for key, samples in (("clean", audio), ("long", audio), ("short", audio[:n_short])):
+        sf.write(tmp_path / f"{key}.wav", samples, 44100, subtype="FLOAT")
+    clean_dir, clip_dir = tmp_path / "clean", tmp_path / "clips"
+    clean_dir.mkdir()
+    clip_dir.mkdir()
+    rows = [{"sample_id": key, "path_clean": str(tmp_path / "clean.wav"),
+             "path_x": str(tmp_path / f"{key}.wav"), "path_s": str(tmp_path / f"{key}.wav")}
+            for key in ("long", "short")]
+    assert process_source_group("1", rows, str(clean_dir), str(clip_dir)) == ("1", 2)
+    clean = np.load(clean_dir / "1.npy")
+    assert clean.shape == (2, n_short)
+    for row in rows:
+        with np.load(clip_dir / f"{row['sample_id']}.npz") as clip:
+            np.testing.assert_array_equal(clip["x"], clean)
+            np.testing.assert_array_equal(clip["s"], clean)
+
+
+@pytest.mark.parametrize("lag", [3, -3])
+def test_teacher_alignment_zeros_boundary(lag):
+    x = np.zeros((2, 128), dtype=np.float32)
+    x[:, 50] = 1
+    s = np.roll(x, lag, axis=-1)
+    s[:, :3] = .25 if lag > 0 else 0
+    s[:, -3:] = .25 if lag < 0 else 0
+    np.testing.assert_array_equal(align_teacher_to_input(x, s), x)
+
+
+def test_checkpoint_config_and_kl_order():
+    assert checkpoint_inference_config({"variant": "v4_3"}, "v4_3")["gate_bias_init"] == -1.5
+    config = {"hop": 1024, "gate_bias_init": -2.0, "chunk_sec": 6.0}
+    ckpt = {"variant": "v4_4", "inference_config": config}
+    assert checkpoint_inference_config(ckpt, "v4_4") == config
+    with pytest.raises(ValueError, match="variant"):
+        checkpoint_inference_config(ckpt, "v4_3")
+    rng = np.random.default_rng(1)
+    audio = rng.normal(size=(2, 8192))
+    reference = logmel(np.hanning(8192) * audio[0])
+    _, kl = spectral_scores(reference, audio)
+    assert kl == pytest.approx(1000 * kl_div(logmel(audio.mean(axis=0)), reference))
 
 
 @pytest.mark.parametrize("hop", [512, 1024])

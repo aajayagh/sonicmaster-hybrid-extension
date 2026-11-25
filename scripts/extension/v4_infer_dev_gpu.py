@@ -18,9 +18,10 @@ ROOT = Path(r"d:\SonicMaster_Reproducing")
 GDRIVE = Path(r"G:\My Drive\SonicMaster_Reproducing")
 sys.path.insert(0, str(ROOT))
 
-from scripts.extension.branch_r import estimate_lag_samples  # noqa: E402
-from scripts.extension.eval_dev import kl_div, logmel, mel_ssim  # noqa: E402
+from scripts.extension.v4_alignment import align_teacher_to_input  # noqa: E402
+from scripts.extension.eval_dev import logmel  # noqa: E402
 from scripts.extension.v4_models import HybridV4Net  # noqa: E402
+from scripts.extension.v4_runtime import checkpoint_inference_config, spectral_scores  # noqa: E402
 
 
 def res(p: str | Path) -> Path:
@@ -39,8 +40,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--variant", required=True)
-    ap.add_argument("--chunk-sec", type=float, default=8.0)
-    ap.add_argument("--gate-bias-init", type=float, default=-1.5)
+    ap.add_argument("--chunk-sec", type=float)
+    ap.add_argument("--gate-bias-init", type=float)
+    ap.add_argument("--output-dir", type=Path)
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -50,11 +52,12 @@ def main() -> None:
         dev_rows = [r for r in csv.DictReader(f) if r["split_ext"] == "dev"]
 
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    model = HybridV4Net(args.variant, hop=512, gate_bias_init=args.gate_bias_init).to(device)
+    config = checkpoint_inference_config(ckpt, args.variant, args.gate_bias_init, args.chunk_sec)
+    model = HybridV4Net(args.variant, hop=config["hop"], gate_bias_init=config["gate_bias_init"]).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
-    out_dir = ROOT / "artifacts" / "10_extension" / "v4" / "pilot_dev_eval" / args.variant
+    out_dir = args.output_dir or ROOT / "artifacts" / "10_extension" / "v4" / "pilot_dev_eval" / args.variant
     out_wav_dir = out_dir / "out_wav"
     out_wav_dir.mkdir(parents=True, exist_ok=True)
 
@@ -73,29 +76,28 @@ def main() -> None:
         c_np = clean_cache[src]
         x_np, _ = load_stereo_np(res(r["path_x"]))
         s_np, _ = load_stereo_np(res(r["path_s"]))
-        n = min(x_np.shape[-1], s_np.shape[-1], c_np.shape[-1])
-        x_np, s_np, c_np = x_np[:, :n], s_np[:, :n], c_np[:, :n]
+        n = min(x_np.shape[-1], s_np.shape[-1])
+        x_np, s_np = x_np[:, :n], s_np[:, :n]
 
         if model.has_teacher:
-            lag, _ = estimate_lag_samples(x_np.T, s_np.T, max_lag=512)
-            s_al = np.roll(s_np, -lag, axis=-1) if lag != 0 else s_np
+            s_al = align_teacher_to_input(x_np, s_np)
             s_t = torch.from_numpy(s_al).unsqueeze(0).to(device)
         else:
             s_t = None
         x_t = torch.from_numpy(x_np).unsqueeze(0).to(device)
 
         with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
-            y_t, diag = model.forward_track(x_t, s_t, chunk_sec=args.chunk_sec, overlap_ratio=0.5)
+            y_t, diag = model.forward_track(x_t, s_t, chunk_sec=config["chunk_sec"], overlap_ratio=0.5)
 
         y_np = y_t.squeeze(0).cpu().numpy()
         clip_rate = float(np.mean(np.abs(y_np) >= 0.999))
         y_save = np.clip(y_np.T, -1.0, 1.0).astype(np.float32)
-        sf.write(str(out_wav_dir / f"{sid}.wav"), y_save, 44100, subtype="PCM_16")
-
-        mc = logmel(c_np.mean(axis=0))
-        my = logmel(y_np.mean(axis=0))
-        s_val = mel_ssim(mc, my)
-        k_val = kl_div(mc, my) * 1000.0
+        wav = out_wav_dir / f"{sid}.wav"
+        sf.write(str(wav), y_save, 44100, subtype="PCM_16")
+        exported, _ = load_stereo_np(wav)
+        score_frames = min(c_np.shape[-1], exported.shape[-1])
+        mc = logmel(c_np[:, :score_frames].mean(axis=0))
+        s_val, k_val = spectral_scores(mc, exported[:, :score_frames])
         stereo_corr = float(np.corrcoef(y_np[0], y_np[1])[0, 1]) if np.std(y_np[0]) > 1e-8 and np.std(y_np[1]) > 1e-8 else 1.0
 
         degs = {d.strip() for d in r["degradation_types"].split("|") if d.strip()}
@@ -128,6 +130,7 @@ def main() -> None:
     meta = {
         "variant": args.variant,
         "epoch": int(ckpt.get("epoch", -1)),
+        "inference_config": config,
         "elapsed_sec": round(time.time() - t0, 1),
         "g_by_family": {k: float(np.mean(v)) for k, v in g_by_fam.items()},
         "per_sample": per_sample,

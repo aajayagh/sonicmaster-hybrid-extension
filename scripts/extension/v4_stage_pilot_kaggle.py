@@ -14,6 +14,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 
 ROOT = Path(r"d:\SonicMaster_Reproducing")
 GDRIVE = Path(r"G:\My Drive\SonicMaster_Reproducing")
@@ -28,7 +29,6 @@ def res(p: str | Path) -> Path:
 
 
 def load_stereo_np(path: Path, frames: int = 1320960) -> np.ndarray:
-    import soundfile as sf
     for attempt in range(3):
         try:
             y, _ = sf.read(io.BytesIO(path.read_bytes()), dtype="float32", always_2d=True)
@@ -48,10 +48,12 @@ def process_source_group(
     clean_out_dir_str: str,
     clips_out_dir_str: str,
 ) -> tuple[str, int]:
-    from scripts.extension.branch_r import estimate_lag_samples
+    from scripts.extension.v4_alignment import align_teacher_to_input
     c_path = res(srows[0]["path_clean"])
     c_full = load_stereo_np(c_path)
-    n_c = c_full.shape[-1]
+    # Choose the crop on the intersection of all valid extents for this source.
+    n_c = min(c_full.shape[-1], *(sf.info(res(r[key])).frames
+              for r in srows for key in ("path_x", "path_s")))
 
     # Pick an active 5.0s window for this source song
     rng = random.Random(int(src) if src.isdigit() else hash(src))
@@ -82,19 +84,15 @@ def process_source_group(
         n = min(x_full.shape[-1], s_full.shape[-1], n_c)
         x_full, s_full = x_full[:, :n], s_full[:, :n]
 
-        lag, _ = estimate_lag_samples(x_full.T, s_full.T, max_lag=512)
-        if lag != 0:
-            s_full = np.roll(s_full, -lag, axis=-1)
+        s_full = align_teacher_to_input(x_full, s_full)
 
         rms_x_full = float(np.sqrt(np.mean(x_full.astype(np.float64) ** 2)) + 1e-8)
         rms_s_full = float(np.sqrt(np.mean(s_full.astype(np.float64) ** 2)) + 1e-8)
 
-        en_eff = min(en, n)
-        st_eff = max(0, en_eff - CHUNK_SAMPLES)
         np.savez(
             Path(clips_out_dir_str) / f"{sid}.npz",
-            x=x_full[:, st_eff:en_eff].astype(np.float16),
-            s=s_full[:, st_eff:en_eff].astype(np.float16),
+            x=x_full[:, best_st:en].astype(np.float16),
+            s=s_full[:, best_st:en].astype(np.float16),
             rms_x=np.float32(rms_x_full),
             rms_s=np.float32(rms_s_full),
         )
