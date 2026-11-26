@@ -1,0 +1,20 @@
+{
+  "scope": "280 Dev clips from 40 sources, five frozen systems",
+  "seed": 20261119,
+  "bootstrap_samples": 2000,
+  "spectral": "saved PCM only, legacy KL output-to-clean",
+  "clap": "same centered 10 seconds per ID, mono 48 kHz",
+  "pq": "common full extent, matched by sample ID",
+  "v3_label": "v3c_minphase_nojoint",
+  "v3_blind": "E1-tight",
+  "hashes": {
+    "tmp/rescore_failure_segments/audiobox_checkpoint.pt": "a4931a7a01c3e6733352e9d85371835f03bf9135f8b31e1583c23538811d4a32",
+    "scripts/extension/v4_runtime.py": "8e3575c8d85eee02b9466b630b8710eb6f14192af6a54e5e90c18abf38a00ea5",
+    "scripts/extension/v4_rescore_dev.py": "5c89feb9372fba289ad85de10145db86b691360d8f209570059d9371081fbe65",
+    "artifacts/10_extension/v4/matched_dev_recheck/manifest.json": "62626ac28fe7c595a1b588b1a9a8d11bdc8f27ab2fb357de8c2f35e41f96f0c1",
+    "scripts/extension/eval_dev.py": "4ebd8cebddb14b66e84d14acb8634cbfea2eb7736ea1c5f4056f3c79c2f6790d",
+    "tmp/rescore_failure_segments/630k-audioset-best.pt": "8053c9775516af2f4902e1e8281e356cc1bf7a85e8b761908170767b77c3f037",
+    "scripts/extension/v4_clap.py": "9bb5cb3ab6e57b497e7294c2be092f12bc08f7d2d582d32d51f69cc131977480",
+    "scripts/extension/v4_rescore_perceptual.py": "ab7fc9daf79fb2ac27d6cc8e26eb0d4eee036a586c47142b368e778e9d89766f"
+  }
+}

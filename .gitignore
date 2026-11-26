@@ -38,6 +38,8 @@ artifacts/10_extension/*
 artifacts/10_extension/v4/*
 !artifacts/10_extension/v4/pilot_splits.json
 !artifacts/10_extension/v4/pilot_dev_eval/
+!artifacts/10_extension/v4/matched_dev_recheck/
+!artifacts/10_extension/v4/residual_sweep_dev/
 artifacts/10_extension/v4/pilot_dev_eval/*
 !artifacts/10_extension/v4/pilot_dev_eval/*summary*.json
 !artifacts/10_extension/v4/pilot_dev_eval/*tables123*.json

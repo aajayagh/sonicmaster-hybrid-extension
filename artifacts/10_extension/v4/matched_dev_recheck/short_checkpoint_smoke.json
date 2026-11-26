@@ -1,0 +1,20 @@
+{
+  "v4_3": {
+    "frames": 8192,
+    "epoch": 20,
+    "inference_config": {
+      "hop": 512,
+      "chunk_sec": 8.0,
+      "gate_bias_init": -1.5
+    }
+  },
+  "v4_4": {
+    "frames": 8192,
+    "epoch": 20,
+    "inference_config": {
+      "hop": 512,
+      "chunk_sec": 8.0,
+      "gate_bias_init": -1.5
+    }
+  }
+}
