@@ -172,7 +172,7 @@ def test_ola_chunk_boundaries(chunk_sec: float, overlap: float) -> None:
 
 
 def test_parameter_counts() -> None:
-    for var in ("v4_0", "v4_1", "v4_2", "v4_3", "v4_4"):
+    for var in ("v4_0", "v4_1", "v4_2", "v4_3", "v4_4", "v4_5p"):
         m = HybridV4Net(var)
         counts = count_parameters_breakdown(m)
         assert 500_000 < counts["total"] < 3_500_000, f"Unexpected param count for {var}: {counts}"
@@ -226,5 +226,63 @@ def test_v4_4_additive_residual() -> None:
 
     crit = HybridV4Loss()
     y_n, d_t = m.forward_normalized(x / 0.2, s / 0.2, torch.zeros(1, 3))
-    loss, _ = crit(y_n, s / 0.2, d_t, stage=2, lambda_ms=1.0, lambda_g=0.0, lambda_kl=2.5)
+    loss, parts = crit(y_n, s / 0.2, d_t, stage=2, lambda_ms=1.5, lambda_g=0.0, lambda_kl=2.5, lambda_hf=1.5)
+    assert "l_hf" in parts and parts["l_hf"] >= 0.0
     loss.backward()
+
+
+def test_v4_5p_decoupled_fusion_and_modspec_loss() -> None:
+    from scripts.extension.v4_losses import HybridV4Loss
+
+    torch.manual_seed(7)
+    m = HybridV4Net("v4_5p", hop=512, gate_bias_init=-1.5)
+
+    # 1. Orthogonal phases check directly on decoder math -> zero magnitude cancellation
+    bsz, n_frames, n_bins = 1, 16, 1025
+    h_in = torch.randn(bsz, n_frames, 24, 64)
+    z_p = torch.complex(torch.ones(bsz, 2, n_bins, n_frames), torch.zeros(bsz, 2, n_bins, n_frames))
+    z_s = torch.complex(torch.zeros(bsz, 2, n_bins, n_frames), torch.ones(bsz, 2, n_bins, n_frames))  # orthogonal 90 deg
+    z_hat, diag = m.decoder(h_in, z_p, z_s, force_identity=False)
+    # At init: dW=0, r=0, f_w == z_p (mag=1), z_s (mag=1) -> mag_fused == 1.0 even though |0.5P+0.5S|=0.707!
+    assert torch.allclose(z_hat.abs(), torch.ones_like(z_hat.abs()), atol=1e-5)
+    assert "g_ph_mean_M" in diag and "g_ph_mean_S" in diag
+
+    # 2. Forced identity & exact x==s identity & RMS match & silence finiteness
+    x = torch.randn(1, 2, 44100 * 3) * 0.1
+    s = torch.randn(1, 2, 44100 * 3) * 0.2
+    y_id, _ = m.forward_track(x, s, chunk_sec=2.0, force_identity=True)
+    rms_x = torch.sqrt(torch.mean(x**2) + 1e-8)
+    rms_s = torch.sqrt(torch.mean(s**2) + 1e-8)
+    assert torch.allclose(y_id, x * (rms_s / rms_x), atol=1e-4)
+
+    y_same, _ = m.forward_track(x, x.clone(), chunk_sec=2.0, force_identity=False)
+    assert torch.allclose(y_same, x, atol=1e-4)
+
+    y_sil, _ = m.forward_track(torch.zeros_like(x), torch.zeros_like(x), chunk_sec=2.0, force_identity=False)
+    assert torch.all(torch.isfinite(y_sil)) and torch.allclose(y_sil, torch.zeros_like(x), atol=1e-6)
+
+    y_out, _ = m.forward_track(x, s, chunk_sec=2.0, force_identity=False)
+    assert torch.isclose(torch.sqrt(torch.mean(y_out**2)), rms_s, rtol=1e-3)
+
+    # 3. ModSpecLoss + re-balanced HybridV4Loss gradients flow cleanly through phase_gate_head
+    crit = HybridV4Loss()
+    y_n, d_t = m.forward_normalized(x / 0.2, s / 0.2, torch.zeros(1, 3))
+    loss, parts = crit(
+        y_n,
+        s / 0.2,
+        d_t,
+        stage=2,
+        lambda_ms=1.0,
+        lambda_g=0.0,
+        lambda_kl=2.0,
+        w_comp=0.25,
+        w_wav=0.15,
+        lambda_mod=2.0,
+    )
+    assert "l_mod" in parts and parts["l_mod"] >= 0.0
+    loss.backward()
+    assert m.decoder.phase_gate_head.weight.grad is not None
+    assert torch.all(torch.isfinite(m.decoder.phase_gate_head.weight.grad))
+    assert float(m.decoder.phase_gate_head.weight.grad.abs().sum().item()) > 0.0
+    assert m.decoder.per_bin_heads[0].weight.grad is not None
+    assert torch.all(torch.isfinite(m.decoder.per_bin_heads[0].weight.grad))

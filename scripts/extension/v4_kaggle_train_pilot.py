@@ -33,6 +33,10 @@ def main() -> None:
     ap.add_argument("--lambda-ms", type=float, default=0.2)
     ap.add_argument("--lambda-g", type=float, default=0.002)
     ap.add_argument("--lambda-kl", type=float, default=0.0)
+    ap.add_argument("--lambda-hf", type=float, default=0.0)
+    ap.add_argument("--w-comp", type=float, default=0.5)
+    ap.add_argument("--w-wav", type=float, default=0.5)
+    ap.add_argument("--lambda-mod", type=float, default=0.0)
     args = ap.parse_args()
 
     api, owner = get_api(args.account_line)
@@ -154,6 +158,10 @@ def run_epoch(model, loader, criterion, optimizer, scaler, device, stage):
                 lambda_ms={args.lambda_ms},
                 lambda_g={args.lambda_g},
                 lambda_kl={args.lambda_kl},
+                lambda_hf={args.lambda_hf},
+                w_comp={args.w_comp},
+                w_wav={args.w_wav},
+                lambda_mod={args.lambda_mod},
             )
         if is_train:
             scaler.scale(loss).backward()
@@ -180,7 +188,7 @@ for var in variants:
     random.seed(20261122)
     vdir = OUT / var
     vdir.mkdir(parents=True, exist_ok=True)
-    has_t = var in ("v4_1", "v4_2", "v4_3", "v4_4")
+    has_t = var in ("v4_1", "v4_2", "v4_3", "v4_4", "v4_5p")
     ds_tr = PilotCropDataset(meta["train_rows"], DATA_DIR, has_t, True)
     ds_va = PilotCropDataset(meta["val_rows"], DATA_DIR, has_t, False)
     dl_tr = DataLoader(ds_tr, batch_size={args.batch_size}, shuffle=True, num_workers=2, pin_memory=True, drop_last=True)

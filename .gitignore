@@ -39,10 +39,18 @@ artifacts/10_extension/v4/*
 !artifacts/10_extension/v4/pilot_splits.json
 !artifacts/10_extension/v4/pilot_dev_eval/
 !artifacts/10_extension/v4/matched_dev_recheck/
+!artifacts/10_extension/v4/matched_dev_v4_4bs/
 !artifacts/10_extension/v4/residual_sweep_dev/
+!artifacts/10_extension/v4/reverb_branch_audit/
+artifacts/10_extension/v4/reverb_branch_audit/*
+!artifacts/10_extension/v4/reverb_branch_audit/summary.json
+!artifacts/10_extension/v4/reverb_branch_audit/spectral_reverb.json
+!artifacts/10_extension/v4/reverb_branch_audit/per_sample.csv
+!artifacts/10_extension/v4/reverb_branch_audit/reverb_branch_audit_table.md
 artifacts/10_extension/v4/pilot_dev_eval/*
 !artifacts/10_extension/v4/pilot_dev_eval/*summary*.json
 !artifacts/10_extension/v4/pilot_dev_eval/*tables123*.json
+!artifacts/10_extension/v4/pilot_dev_eval/*results_table*.md
 
 # LaTeX build junk & personal PDFs/docs if not needed (keep .md & .tex)
 *.aux

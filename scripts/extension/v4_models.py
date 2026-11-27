@@ -283,6 +283,8 @@ class MF7Decoder(nn.Module):
         gate_bias_init: float = -5.0,
         mf_offsets: tuple[int, ...] = MF7_OFFSETS,
         use_additive_residual: bool = False,
+        decoupled_fusion: bool = False,
+        residual_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.band_slices = band_slices
@@ -290,7 +292,8 @@ class MF7Decoder(nn.Module):
         self.mf_offsets = mf_offsets
         self.n_taps_other = len(mf_offsets)
         self.use_additive_residual = use_additive_residual
-        self.residual_scale = 1.0
+        self.decoupled_fusion = decoupled_fusion
+        self.residual_scale = residual_scale
         self.residual_sweep: tuple[float, ...] | None = None
 
         self.shared_mlp = nn.Sequential(
@@ -304,6 +307,7 @@ class MF7Decoder(nn.Module):
         self.per_bin_heads = nn.ModuleList()
         # 4 sub-bands per psychoacoustic band -> 96 sub-bands total
         sub_map = []
+        band_map = []
         ch_per_bin = 14 if use_additive_residual else 10
         for b_idx, (s_b, e_b) in enumerate(band_slices):
             w_b = e_b - s_b
@@ -311,11 +315,18 @@ class MF7Decoder(nn.Module):
             nn.init.zeros_(lin.weight)
             nn.init.zeros_(lin.bias)
             self.per_bin_heads.append(lin)
+            band_map.extend([b_idx] * w_b)
             for local_i in range(w_b):
                 sb_local = min(3, (local_i * 4) // w_b)
                 sub_map.append(b_idx * 4 + sb_local)
 
         self.register_buffer("subband_map", torch.tensor(sub_map, dtype=torch.long), persistent=False)
+        self.register_buffer("band_map", torch.tensor(band_map, dtype=torch.long), persistent=False)
+
+        if decoupled_fusion:
+            self.phase_gate_head = nn.Linear(embed_dim, 2)
+            nn.init.zeros_(self.phase_gate_head.weight)
+            nn.init.zeros_(self.phase_gate_head.bias)
 
         # Shared sub-band multi-frame head: predicts 4 sub-bands x 6 taps x 8 (2x2 complex)
         self.mf_head = nn.Linear(embed_dim, 4 * self.n_taps_other * 8)
@@ -372,9 +383,18 @@ class MF7Decoder(nn.Module):
                 r_raw = 2.0 * torch.tanh(out_b[:, :, 10 * w_b : 14 * w_b]).reshape(bsz, n_frames, w_b, 4)
                 zx_b = z_x[:, :, s_b:e_b, :]
                 zs_b = z_s[:, :, s_b:e_b, :]
-                band_rms = torch.sqrt(
-                    torch.mean(zx_b.abs() ** 2 + zs_b.abs() ** 2, dim=(1, 2), keepdim=True) + 1e-6
-                )  # (B, 1, 1, T)
+                if self.decoupled_fusion:
+                    band_rms = torch.sqrt(
+                        torch.maximum(
+                            zx_b.abs().square().mean(dim=(1, 2), keepdim=True),
+                            zs_b.abs().square().mean(dim=(1, 2), keepdim=True),
+                        )
+                        + 1e-6
+                    )
+                else:
+                    band_rms = torch.sqrt(
+                        torch.mean(zx_b.abs() ** 2 + zs_b.abs() ** 2, dim=(1, 2), keepdim=True) + 1e-6
+                    )  # (B, 1, 1, T)
                 r_m_b = torch.complex(r_raw[..., 0].transpose(1, 2), r_raw[..., 1].transpose(1, 2)) * band_rms.squeeze(1)
                 r_s_b = torch.complex(r_raw[..., 2].transpose(1, 2), r_raw[..., 3].transpose(1, 2)) * band_rms.squeeze(1)
                 r_m_list.append(r_m_b)
@@ -404,7 +424,26 @@ class MF7Decoder(nn.Module):
                 z_shifted = F.pad(z_x[..., pad_r:], (0, pad_r))
             f_w = f_w + self._apply_2x2_complex(dwk_bins[:, :, :, tap_idx, :], z_shifted)
 
-        z_hat = (1.0 - g_ms) * f_w + g_ms * z_s
+        if self.decoupled_fusion:
+            mag_p = torch.sqrt(f_w.real**2 + f_w.imag**2 + 1e-12)
+            mag_s = torch.sqrt(z_s.real**2 + z_s.imag**2 + 1e-12)
+            u_p = f_w / mag_p
+            u_s = z_s / mag_s
+            mag_fused = (1.0 - g_ms) * mag_p + g_ms * mag_s
+
+            ph_logits = self.phase_gate_head(hs)  # (B, T, 24, 2)
+            ph_seq = ph_logits.permute(0, 2, 3, 1).reshape(bsz * n_bands, 2, n_frames)
+            k_sm = min(9, n_frames if n_frames % 2 == 1 else max(1, n_frames - 1))
+            ph_sm = F.avg_pool1d(ph_seq, kernel_size=k_sm, stride=1, padding=k_sm // 2, count_include_pad=False)
+            g_ph_band = torch.sigmoid(ph_sm.reshape(bsz, n_bands, 2, n_frames).permute(0, 2, 1, 3) + self.gate_bias_init)
+            g_ph = g_ph_band[:, :, self.band_map, :]  # (B, 2, F, T)
+
+            u_mix = (1.0 - g_ph) * u_p + g_ph * u_s
+            u_norm = torch.sqrt(u_mix.real**2 + u_mix.imag**2 + 1e-6)
+            u_out = u_mix / u_norm
+            z_hat = mag_fused * u_out
+        else:
+            z_hat = (1.0 - g_ms) * f_w + g_ms * z_s
         if self.use_additive_residual:
             r_ms = torch.stack([torch.cat(r_m_list, dim=1), torch.cat(r_s_list, dim=1)], dim=1)
             if self.residual_sweep is None:
@@ -421,17 +460,20 @@ class MF7Decoder(nn.Module):
             "dw0_rms": torch.sqrt(torch.mean(dw0**2) + 1e-12),
             "dwk_rms": torch.sqrt(torch.mean(dwk_bins**2) + 1e-12),
         }
+        if self.decoupled_fusion:
+            diag["g_ph_mean_M"] = g_ph[:, 0].mean()
+            diag["g_ph_mean_S"] = g_ph[:, 1].mean()
         if self.use_additive_residual:
             diag["res_rms"] = torch.sqrt(torch.mean(r_ms.abs() ** 2) + 1e-12).detach()
         return z_hat, diag
 
 
 class HybridV4Net(nn.Module):
-    """Unified Hybrid-v4 Network supporting V4-0 (NoGuide), V4-1 (DirectMap), V4-2 (MF7), and V4-3 (Dilated MF9)."""
+    """Unified Hybrid-v4 Network supporting V4-0..V4-4 and V4-5p (Decoupled Magnitude-Phase Fusion)."""
 
     def __init__(
         self,
-        variant: Literal["v4_0", "v4_1", "v4_2", "v4_3", "v4_4"],
+        variant: Literal["v4_0", "v4_1", "v4_2", "v4_3", "v4_4", "v4_5p"],
         embed_dim: int = 64,
         n_blocks: int = 4,
         n_fft: int = 2048,
@@ -440,7 +482,7 @@ class HybridV4Net(nn.Module):
     ) -> None:
         super().__init__()
         self.variant = variant
-        self.has_teacher = variant in ("v4_1", "v4_2", "v4_3", "v4_4")
+        self.has_teacher = variant in ("v4_1", "v4_2", "v4_3", "v4_4", "v4_5p")
         self.n_fft = n_fft
         self.hop = hop
 
@@ -470,6 +512,16 @@ class HybridV4Net(nn.Module):
                 gate_bias_init=gate_bias_init,
                 mf_offsets=MF9_DILATED_OFFSETS,
                 use_additive_residual=True,
+            )
+        elif variant == "v4_5p":
+            self.decoder = MF7Decoder(
+                self.encoder.band_slices,
+                embed_dim=embed_dim,
+                gate_bias_init=gate_bias_init,
+                mf_offsets=MF9_DILATED_OFFSETS,
+                use_additive_residual=True,
+                decoupled_fusion=True,
+                residual_scale=0.5,
             )
         else:
             raise ValueError(f"Unknown variant: {variant}")
@@ -527,7 +579,7 @@ class HybridV4Net(nn.Module):
         if n_samples <= chunk_len:
             y_in, diag = self.forward_normalized(x_in, s_in, raw_stats, force_identity=force_identity)
             y_out = y_in * scale
-            if self.variant in ("v4_3", "v4_4") and s is not None and not force_identity:
+            if self.variant in ("v4_3", "v4_4", "v4_5p") and s is not None and not force_identity:
                 rms_s = torch.sqrt(torch.mean(s.float() ** 2) + 1e-12)
                 if self.decoder.residual_sweep is not None:
                     rms_y = torch.sqrt(y_out.float().square().mean(dim=(1, 2), keepdim=True) + 1e-12)
@@ -568,7 +620,7 @@ class HybridV4Net(nn.Module):
         y_pad = acc / torch.clamp(w_sum, min=1e-6)
         y_in = y_pad[:, :, pad_l : pad_l + n_samples]
         y_out = y_in * scale
-        if self.variant in ("v4_3", "v4_4") and s is not None and not force_identity:
+        if self.variant in ("v4_3", "v4_4", "v4_5p") and s is not None and not force_identity:
             rms_s = torch.sqrt(torch.mean(s.float() ** 2) + 1e-12)
             if sweep is not None:
                 rms_y = torch.sqrt(y_out.float().square().mean(dim=(1, 2), keepdim=True) + 1e-12)

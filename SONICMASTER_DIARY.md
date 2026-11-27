@@ -696,3 +696,23 @@ Shard5-16 chua chuan bi. Coordinator van running, pause_new=False. Haiworker dan
   - **24-Band Split & Dual-Axis Time–Frequency Backbone:** Luo & Yu, *"BSRNN"*, TASLP 2023 (`arXiv:2209.15174`); Wang et al., *"TF-GridNet"*, TASLP 2023 (`arXiv:2211.12433`).
   - **Multi-Resolution STFT Loss:** Yamamoto et al., *"Parallel WaveGAN"*, ICASSP 2020 (`arXiv:1910.11480`).
   - **Metrics đánh giá:** *Audiobox Aesthetics* (`PQ`, Tjandra et al., `arXiv:2502.05139`), *LAION-CLAP* (Wu et al., ICASSP 2023, `arXiv:2211.06687`), *FAD/fadtk* (Gui et al., ICASSP 2024, `arXiv:2311.01616`), *SSIM* (Wang et al., IEEE TIP 2004).
+
+### 5. `V4-4bs` (`2026-11-26` — Sửa `bright` + `stereo` từ Epoch 1)
+- **Thay đổi:**
+  - Bật `l_ms` từ Epoch 1 (`--stage2-epoch 1`, `--lambda-ms 1.5`) thay vì đợi Epoch 13.
+  - Thêm `HighFreqBrightLoss` (`>= 6 kHz` energy ratio + log-mag, `--lambda-hf 1.5`) trong `scripts/extension/v4_losses.py`.
+  - Train trên Kaggle T4 (`aajayagh/sonicmaster-v4-pilot-v4-4bs-run`, `20 epochs`, `batch_size=12`).
+- **Kết quả Dev `280` (`v4_4bs_summary.json`, `v4_4bs_tables123.json`):**
+  - `SSIM = 0.8076`, `KL×1000 = 1.1229`, **`FAD-CLAP = 0.1315`** (tốt hơn `A0 = 0.1674` tới `-21.5%`), `Audiobox PQ = 7.3322` (`ΔPQ = -0.3131`).
+  - **Attribute Guards (`eval_tables123.py`):** `11/12` PASS (`stereo = +0.04994` với mẫu số input `0.42272`; `bright = +0.1619`).
+  - **Đối chiếu theo giao thức chấm chung (`artifacts/10_extension/v4/matched_dev_v4_4bs/summary.json`):** Đặt `v4_4bs` và `v4_4` cũ trên cùng số frame từ manifest cố định (mẫu số input `stereo` = `0.40720` thay vì `0.42272`). Sai số thô `stereo` của `v4_4bs` (`0.09453`) cải thiện rõ **`~16.4%`** so với `v4_4` cũ (`0.11310`), nhưng điểm guard theo giao thức chung là **`+0.05184`** (còn cách ngưỡng `0.05` khoảng `0.0018`, `v4_4` cũ là `+0.09745`), `bright` = `+0.1286`, `ΔPQ vs v4_4 = -0.0017` (CI95 `[-0.0173, +0.0135]`).
+
+### 6. `Reverb Branch Audit` trên `Dev Reverb (N = 106)` (`2026-11-27`)
+- **Mục tiêu:** Chẩn đoán định lượng từng nhánh (`Input`, `P = F_W(Z_x)`, `Pg = (1-g)P + gS`, `Full = Pg + R`, `A0`) bằng chỉ số Reverb chính thức (Modulation Spectrum Distance - MSD), `Audiobox PQ`, `Mel-SSIM`, `Mel-KL×1000` trên cùng manifest cố định (`matched_dev_recheck/manifest.json`), kèm 6 bộ nghe đối chứng (`reverb_branch_audit/listening/`).
+- **Script & Artifacts:** [v4_reverb_branch_audit_gpu.py](file:///d:/SonicMaster_Reproducing/scripts/extension/v4_reverb_branch_audit_gpu.py), [v4_reverb_branch_audit_pq.py](file:///d:/SonicMaster_Reproducing/scripts/extension/v4_reverb_branch_audit_pq.py), [reverb_branch_audit_table.md](file:///d:/SonicMaster_Reproducing/artifacts/10_extension/v4/reverb_branch_audit/reverb_branch_audit_table.md), [v4_reverb_branch_audit.png](file:///d:/SonicMaster_Reproducing/artifacts/10_extension/figures/v4_reverb_branch_audit.png).
+- **Kết quả then chốt (`N = 106` Reverb):**
+  - `Input`: `MSD = 0.5309`, `PQ = 6.3466`, `SSIM = 0.6176`, `KL = 5.9385`
+  - `P (F_W only)`: `MSD = 0.5695` *(tệ hơn Input `+0.0333` CI `[-0.0041, +0.0700]`)*, `PQ = 6.3464` *(`Δ = +0.0036`)*, `SSIM = 0.6436`, `KL = 4.8841`
+  - `Pg (no R)`: `MSD = 0.3985` *(`Δ vs P = -0.1709`)*, `PQ = 6.8858` *(`Δ vs P = +0.5519`)*, `SSIM = 0.6779`, `KL = 1.9816`
+  - `Full (V4-4)`: `MSD = 0.3899` *(xấp xỉ `A0 = 0.3853`, CI ΔMSD vs A0 `[-0.0029, +0.0139]`)*, `PQ = 6.8800` *(`Δ vs A0 = -0.7058`)*, `SSIM = 0.6804`, `KL = 1.5529`
+  - **Phát hiện quan trọng:** Nhánh `P` tự thân **không khử được vang** trên `small/big/real` mà hơi làm xấu MSD (`0.5309 → 0.5695`); gần như toàn bộ lực khử MSD & tăng PQ (`+0.5519`) đến từ `Pg` mở gate lấy `S` ở dải trầm `0–1 kHz` (`mean_g = 0.342`), trong khi suốt dải `1–12 kHz` bị rào cản triệt tiêu pha (`cos(P, S) ≈ 0.001–0.257`, `cancel50 = 0.763–0.767`) ép `mean_g` về `0.038–0.050`, khiến ~95% dải trung-cao đi qua `P` kéo `PQ` tụt mạnh so với `A0` dù `MSD` tổng đã xấp xỉ `A0`.

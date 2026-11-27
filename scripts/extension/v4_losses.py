@@ -55,6 +55,67 @@ class MelKLLoss(nn.Module):
         return kl + 0.1 * log_mel_l1
 
 
+class HighFreqBrightLoss(nn.Module):
+    """Differentiable >= 6 kHz energy-ratio + log-mag loss targeting the 'bright' guard."""
+
+    def __init__(self, sr: int = 44100, n_fft: int = 2048, hop: int = 512, f_lo: float = 6000.0, eps: float = 1e-8) -> None:
+        super().__init__()
+        self.n_fft = n_fft
+        self.hop = hop
+        self.bin_lo = int(round(f_lo * n_fft / float(sr)))
+        self.eps = eps
+
+    def forward(self, y_hat: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        yh_m = 0.5 * (y_hat[:, 0] + y_hat[:, 1]).float()
+        yt_m = 0.5 * (target[:, 0] + target[:, 1]).float()
+        win = torch.hann_window(self.n_fft, periodic=True, device=y_hat.device, dtype=torch.float32)
+        zh = torch.stft(yh_m, n_fft=self.n_fft, hop_length=self.hop, win_length=self.n_fft, window=win, center=True, return_complex=True)
+        zt = torch.stft(yt_m, n_fft=self.n_fft, hop_length=self.hop, win_length=self.n_fft, window=win, center=True, return_complex=True)
+        ph = zh.real**2 + zh.imag**2
+        pt = zt.real**2 + zt.imag**2
+        eh_ratio = ph[:, self.bin_lo :, :].sum(dim=(-2, -1)) / (ph.sum(dim=(-2, -1)) + self.eps)
+        et_ratio = pt[:, self.bin_lo :, :].sum(dim=(-2, -1)) / (pt.sum(dim=(-2, -1)) + self.eps)
+        l_ratio = F.l1_loss(eh_ratio, et_ratio) * 50.0
+        l_hf_mag = F.l1_loss(
+            torch.log(torch.sqrt(ph[:, self.bin_lo :, :] + self.eps)),
+            torch.log(torch.sqrt(pt[:, self.bin_lo :, :] + self.eps)),
+        )
+        return l_ratio + 0.2 * l_hf_mag
+
+
+class ModSpecLoss(nn.Module):
+    """Differentiable Table-2 Modulation Spectrum Distance on full-band and 1-12 kHz sub-band."""
+
+    def __init__(self, n_fft: int = 1024, hop: int = 512, n_mod_bins: int = 20, eps: float = 1e-8) -> None:
+        super().__init__()
+        self.n_fft = n_fft
+        self.hop = hop
+        self.n_mod_bins = n_mod_bins
+        self.eps = eps
+
+    def _norm_mod(self, mag: torch.Tensor) -> torch.Tensor:
+        env = mag - mag.mean(dim=-1, keepdim=True)
+        spec_c = torch.fft.fft(env, dim=-1)
+        spec = torch.sqrt(spec_c.real**2 + spec_c.imag**2 + 1e-12)[..., : self.n_mod_bins]
+        flat = spec.reshape(spec.shape[0], -1)
+        norm = torch.sqrt(flat.square().sum(dim=-1, keepdim=True) + 1e-12)
+        return flat / norm
+
+    def forward(self, y_hat: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        yh_m = 0.5 * (y_hat[:, 0] + y_hat[:, 1]).float()
+        yt_m = 0.5 * (target[:, 0] + target[:, 1]).float()
+        win = torch.hann_window(self.n_fft, periodic=True, device=y_hat.device, dtype=torch.float32)
+        zh = torch.stft(yh_m, n_fft=self.n_fft, hop_length=self.hop, win_length=self.n_fft, window=win, center=True, return_complex=True)
+        zt = torch.stft(yt_m, n_fft=self.n_fft, hop_length=self.hop, win_length=self.n_fft, window=win, center=True, return_complex=True)
+        mh = torch.sqrt(zh.real**2 + zh.imag**2 + self.eps)
+        mt = torch.sqrt(zt.real**2 + zt.imag**2 + self.eps)
+        if mh.shape[-1] < self.n_mod_bins:
+            return y_hat.new_zeros(())
+        d_full = torch.sqrt(((self._norm_mod(mh) - self._norm_mod(mt)) ** 2).sum(dim=-1) + 1e-12).mean()
+        d_midhi = torch.sqrt(((self._norm_mod(mh[:, 24:280, :]) - self._norm_mod(mt[:, 24:280, :])) ** 2).sum(dim=-1) + 1e-12).mean()
+        return 0.5 * d_full + 0.5 * d_midhi
+
+
 class MultiResSTFTLoss(nn.Module):
     """Multi-resolution STFT spectral convergence + log-magnitude L1 on L/R and M/S."""
 
@@ -93,6 +154,8 @@ class HybridV4Loss(nn.Module):
         super().__init__()
         self.mrstft = MultiResSTFTLoss()
         self.mel_kl = MelKLLoss()
+        self.hf_bright = HighFreqBrightLoss()
+        self.mod_spec = ModSpecLoss()
 
     def forward(
         self,
@@ -104,6 +167,10 @@ class HybridV4Loss(nn.Module):
         lambda_g: float = 0.002,
         lambda_w: float = 0.005,
         lambda_kl: float = 0.0,
+        lambda_hf: float = 0.0,
+        w_comp: float = 0.5,
+        w_wav: float = 0.5,
+        lambda_mod: float = 0.0,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         y_f = y_hat.float()
         t_f = target.float()
@@ -114,7 +181,7 @@ class HybridV4Loss(nn.Module):
         zt_c = compress_stft(stft_ms(lr_to_ms(t_f), n_fft=2048, hop=512))
         l_comp = F.l1_loss(zh_c.real, zt_c.real) + F.l1_loss(zh_c.imag, zt_c.imag)
 
-        loss = 1.0 * l_stft + 0.5 * l_comp + 0.5 * l_wav
+        loss = 1.0 * l_stft + w_comp * l_comp + w_wav * l_wav
         parts = {
             "l_stft": float(l_stft.item()),
             "l_comp": float(l_comp.item()),
@@ -124,6 +191,14 @@ class HybridV4Loss(nn.Module):
             l_kl = self.mel_kl(y_f, t_f)
             loss = loss + lambda_kl * l_kl
             parts["l_kl"] = float(l_kl.item())
+        if lambda_hf > 0.0:
+            l_hf = self.hf_bright(y_f, t_f)
+            loss = loss + lambda_hf * l_hf
+            parts["l_hf"] = float(l_hf.item())
+        if lambda_mod > 0.0:
+            l_mod = self.mod_spec(y_f, t_f)
+            loss = loss + lambda_mod * l_mod
+            parts["l_mod"] = float(l_mod.item())
 
         if stage >= 2:
             y_ms = lr_to_ms(y_f)

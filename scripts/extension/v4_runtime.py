@@ -14,7 +14,7 @@ def checkpoint_inference_config(
         raise ValueError(f"Checkpoint variant {saved_variant!r} does not match {variant!r}")
     saved = checkpoint.get("inference_config", {})
     # Historical checkpoints predate this metadata. Match the recorded Dev runners.
-    legacy_bias = -1.5 if variant in {"v4_3", "v4_4"} else -3.5
+    legacy_bias = -1.5 if variant in {"v4_3", "v4_4", "v4_5p"} else -3.5
     return {
         "hop": int(saved.get("hop", 512)),
         "chunk_sec": float(chunk_sec if chunk_sec is not None else saved.get("chunk_sec", 8.0)),
