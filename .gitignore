@@ -40,6 +40,7 @@ artifacts/10_extension/v4/*
 !artifacts/10_extension/v4/pilot_dev_eval/
 !artifacts/10_extension/v4/matched_dev_recheck/
 !artifacts/10_extension/v4/matched_dev_v4_4bs/
+!artifacts/10_extension/v4/matched_dev_v4_5p/
 !artifacts/10_extension/v4/residual_sweep_dev/
 !artifacts/10_extension/v4/reverb_branch_audit/
 artifacts/10_extension/v4/reverb_branch_audit/*

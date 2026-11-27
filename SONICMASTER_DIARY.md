@@ -716,3 +716,12 @@ Shard5-16 chua chuan bi. Coordinator van running, pause_new=False. Haiworker dan
   - `Pg (no R)`: `MSD = 0.3985` *(`Δ vs P = -0.1709`)*, `PQ = 6.8858` *(`Δ vs P = +0.5519`)*, `SSIM = 0.6779`, `KL = 1.9816`
   - `Full (V4-4)`: `MSD = 0.3899` *(xấp xỉ `A0 = 0.3853`, CI ΔMSD vs A0 `[-0.0029, +0.0139]`)*, `PQ = 6.8800` *(`Δ vs A0 = -0.7058`)*, `SSIM = 0.6804`, `KL = 1.5529`
   - **Phát hiện quan trọng:** Nhánh `P` tự thân **không khử được vang** trên `small/big/real` mà hơi làm xấu MSD (`0.5309 → 0.5695`); gần như toàn bộ lực khử MSD & tăng PQ (`+0.5519`) đến từ `Pg` mở gate lấy `S` ở dải trầm `0–1 kHz` (`mean_g = 0.342`), trong khi suốt dải `1–12 kHz` bị rào cản triệt tiêu pha (`cos(P, S) ≈ 0.001–0.257`, `cancel50 = 0.763–0.767`) ép `mean_g` về `0.038–0.050`, khiến ~95% dải trung-cao đi qua `P` kéo `PQ` tụt mạnh so với `A0` dù `MSD` tổng đã xấp xỉ `A0`.
+
+### 7. `V4-5p` (`2026-11-27` — Decoupled Magnitude–Phase Fusion + `ModSpecLoss`)
+- **Thiết kế & Huấn luyện:** Tách trộn biên độ khỏi pha (`MP-SENet` style) để xóa triệt tiêu pha `-24%` trên `1–22 kHz`, thêm `phase_gate_head` mượt theo 24 dải (`+130` params → `1,953,200` params), thêm `ModSpecLoss` (`λ_mod=2.0`), hạ `w_comp=0.25`, `w_wav=0.15`, `residual_scale=0.5`, bật `l_ms=1.0` từ Epoch 1. Train 20 epochs trên `aajayagh/sonicmaster-v4-pilot-v4-5p-run` (Ep 20 val: `g_mean_M=0.2516`, `g_mean_S=0.2559`, `g_ph_mean_M=0.0564`).
+- **Kết quả chuẩn Giao thức chấm chung (`matched_dev_v4_5p/summary.json`, `v4_5p_results_table.md`, `N=280`):**
+  - **`Mel-SSIM = 0.8396`** (kỷ lục mới; `+0.0135` vs `V4-4` CI `[+0.0109, +0.0164]`).
+  - **`Mel-KL×1000 = 0.9345`** (kỷ lục mới; **tốt hơn cả `A0 = 1.1064` `-15.5%`** và `-0.1130` vs `V4-4`).
+  - **`FAD-CLAP = 0.1154`** (`-31.1%` vs `A0 = 0.1674`; tốt hơn `V4-4 = 0.1304` & `V3-Blind = 0.1159`).
+  - **`Audiobox PQ = 7.3775`** (`+0.0436` vs `V4-4`, CI `[+0.0265, +0.0617]`; trên `Reverb 106`: `PQ = 6.9494` [`+0.0617` vs `V4-4`], **`Official MSD = 0.3790`** tốt hơn `A0 = 0.3853`!).
+  - **Attribute Guards (`Matched Common Protocol`):** **`11/12` PASS** — **`stereo = +0.0431 [PASS]`**, `boom = -0.0500`, `vocal = -0.0439`, `punch = -0.1261`, `volume = +0.0007`; chỉ còn duy nhất `bright = +0.1710 [FAIL]`.
