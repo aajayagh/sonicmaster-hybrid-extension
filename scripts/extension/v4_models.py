@@ -273,6 +273,114 @@ class DirectMapDecoder(nn.Module):
         return decompress_stft(z_hat_c)
 
 
+class WindowedModCueExtractor(nn.Module):
+    """Extract 6 length-invariant blind acoustic cues per 24 bands on fixed 2.0s sliding windows."""
+
+    def __init__(self, band_slices: list[tuple[int, int]], win_frames: int = 172, stride: int = 86) -> None:
+        super().__init__()
+        self.band_slices = band_slices
+        self.win_frames = win_frames
+        self.stride = stride
+        self.register_buffer("mod_win", torch.hann_window(win_frames, periodic=True), persistent=False)
+
+    @torch.amp.autocast("cuda", enabled=False)
+    def forward(self, z_x: torch.Tensor, z_s: torch.Tensor) -> torch.Tensor:
+        """z_x, z_s: complex (B, 2, F=1025, T) -> float32 (B, 24, 6)."""
+        zx = z_x.to(torch.complex64)
+        zs = z_s.to(torch.complex64)
+        n_frames = zx.shape[-1]
+
+        amp_x_list, amp_s_list = [], []
+        ex_list, es_list = [], []
+        px_conj_ps_re, px_abs_ps_abs = [], []
+        for s_b, e_b in self.band_slices:
+            xb = zx[:, :, s_b:e_b, :]
+            sb = zs[:, :, s_b:e_b, :]
+            ex_b = (xb.real**2 + xb.imag**2).mean(dim=(1, 2))
+            es_b = (sb.real**2 + sb.imag**2).mean(dim=(1, 2))
+            ex_list.append(ex_b)
+            es_list.append(es_b)
+            amp_x_list.append(torch.sqrt(ex_b + 1e-8))
+            amp_s_list.append(torch.sqrt(es_b + 1e-8))
+            px_conj_ps_re.append(torch.real(xb * torch.conj(sb)).sum(dim=(1, 2)))
+            px_abs_ps_abs.append((xb.abs() * sb.abs()).sum(dim=(1, 2)))
+
+        ex = torch.stack(ex_list, dim=1)
+        es = torch.stack(es_list, dim=1)
+        ax = torch.stack(amp_x_list, dim=1)
+        as_ = torch.stack(amp_s_list, dim=1)
+        p_dot = torch.stack(px_conj_ps_re, dim=1)
+        p_norm = torch.stack(px_abs_ps_abs, dim=1)
+
+        w_len = self.win_frames
+        if n_frames < w_len:
+            pad_r = w_len - n_frames
+            ex = F.pad(ex, (0, pad_r))
+            es = F.pad(es, (0, pad_r))
+            ax = F.pad(ax, (0, pad_r))
+            as_ = F.pad(as_, (0, pad_r))
+            p_dot = F.pad(p_dot, (0, pad_r))
+            p_norm = F.pad(p_norm, (0, pad_r))
+
+        ex_w = ex.unfold(-1, w_len, self.stride)
+        es_w = es.unfold(-1, w_len, self.stride)
+        ax_w = ax.unfold(-1, w_len, self.stride)
+        as_w = as_.unfold(-1, w_len, self.stride)
+        dot_w = p_dot.unfold(-1, w_len, self.stride).sum(dim=-1)
+        nrm_w = p_norm.unfold(-1, w_len, self.stride).sum(dim=-1)
+
+        mw = self.mod_win.to(ax_w.device, dtype=torch.float32).view(1, 1, 1, w_len)
+        wx_c = (ax_w - ax_w.mean(dim=-1, keepdim=True)) * mw
+        ws_c = (as_w - as_w.mean(dim=-1, keepdim=True)) * mw
+        ms_x = torch.fft.rfft(wx_c, dim=-1).abs()[..., 1:17]
+        ms_s = torch.fft.rfft(ws_c, dim=-1).abs()[..., 1:17]
+        nx = ms_x / (torch.linalg.norm(ms_x, dim=-1, keepdim=True) + 1e-8)
+        ns = ms_s / (torch.linalg.norm(ms_s, dim=-1, keepdim=True) + 1e-8)
+        d_mod = torch.linalg.norm(nx - ns, dim=-1).mean(dim=-1)
+
+        rho_x = ms_x[..., 7:16].square().sum(dim=-1) / (ms_x.square().sum(dim=-1) + 1e-8)
+        rho_s = ms_s[..., 7:16].square().sum(dim=-1) / (ms_s.square().sum(dim=-1) + 1e-8)
+        delta_rho = (rho_s - rho_x).mean(dim=-1)
+
+        cv_x = ax_w.std(dim=-1, unbiased=False) / (ax_w.mean(dim=-1) + 1e-6)
+        cv_s = as_w.std(dim=-1, unbiased=False) / (as_w.mean(dim=-1) + 1e-6)
+        env_var_ratio = torch.log((cv_s + 1e-4) / (cv_x + 1e-4)).mean(dim=-1)
+        log_band_ratio = torch.clamp(torch.log((es_w.mean(dim=-1) + 1e-6) / (ex_w.mean(dim=-1) + 1e-6)), -4.0, 4.0).mean(dim=-1)
+
+        cos_w = torch.where(nrm_w > 1e-9, dot_w / torch.clamp(nrm_w, min=1e-9), torch.ones_like(dot_w))
+        phase_decorr = (1.0 - torch.clamp(cos_w, -1.0, 1.0)).mean(dim=-1)
+
+        dx = ax_w - ax_w.mean(dim=-1, keepdim=True)
+        ds = as_w - as_w.mean(dim=-1, keepdim=True)
+        cov = (dx * ds).sum(dim=-1)
+        denom_corr = torch.sqrt(dx.square().sum(dim=-1) * ds.square().sum(dim=-1))
+        corr = torch.where(denom_corr > 1e-9, cov / torch.clamp(denom_corr, min=1e-9), torch.ones_like(cov))
+        env_corr_loss = (1.0 - torch.clamp(corr, -1.0, 1.0)).mean(dim=-1)
+
+        return torch.stack([d_mod, delta_rho, env_var_ratio, log_band_ratio, phase_decorr, env_corr_loss], dim=-1)
+
+
+class BlindReverbHead(nn.Module):
+    """Lightweight blind reverb detector combining backbone h and 2.0s physical modulation cues."""
+
+    def __init__(self, embed_dim: int = 64, n_bands: int = 24, n_cues: int = 6, bias_init: float = -4.0) -> None:
+        super().__init__()
+        self.norm_in = nn.LayerNorm(embed_dim + n_cues)
+        self.proj_band = nn.Linear(embed_dim + n_cues, 8)
+        self.fc_hid = nn.Linear(n_bands * 8, 64)
+        self.fc_out = nn.Linear(64, 1)
+        nn.init.zeros_(self.fc_out.weight)
+        nn.init.constant_(self.fc_out.bias, bias_init)
+
+    def forward(self, h: torch.Tensor, cues: torch.Tensor) -> torch.Tensor:
+        """h: (B, T, 24, D), cues: (B, 24, 6) -> rev_logit: (B,)."""
+        h_pool = h.float().mean(dim=1)
+        x = torch.cat([h_pool, cues.float()], dim=-1)
+        x = F.gelu(self.proj_band(self.norm_in(x))).reshape(x.shape[0], -1)
+        x = F.gelu(self.fc_hid(x))
+        return self.fc_out(x).squeeze(-1)
+
+
 class MF7Decoder(nn.Module):
     """Identity-centered 2x2 M/S 7-frame complex filter + teacher gate on LINEAR STFT."""
 
@@ -285,8 +393,12 @@ class MF7Decoder(nn.Module):
         use_additive_residual: bool = False,
         decoupled_fusion: bool = False,
         residual_scale: float = 1.0,
+        use_reverb_routing: bool = False,
+        use_hf_def_routing: bool = False,
     ) -> None:
         super().__init__()
+        if use_hf_def_routing and not use_reverb_routing:
+            raise ValueError("use_hf_def_routing requires use_reverb_routing=True")
         self.band_slices = band_slices
         self.gate_bias_init = gate_bias_init
         self.mf_offsets = mf_offsets
@@ -294,6 +406,8 @@ class MF7Decoder(nn.Module):
         self.use_additive_residual = use_additive_residual
         self.decoupled_fusion = decoupled_fusion
         self.residual_scale = residual_scale
+        self.use_reverb_routing = use_reverb_routing
+        self.use_hf_def_routing = use_hf_def_routing
         self.residual_sweep: tuple[float, ...] | None = None
 
         self.shared_mlp = nn.Sequential(
@@ -327,6 +441,18 @@ class MF7Decoder(nn.Module):
             self.phase_gate_head = nn.Linear(embed_dim, 2)
             nn.init.zeros_(self.phase_gate_head.weight)
             nn.init.zeros_(self.phase_gate_head.bias)
+
+        if use_reverb_routing:
+            self.mod_cue_extractor = WindowedModCueExtractor(band_slices)
+            self.reverb_head = BlindReverbHead(embed_dim=embed_dim, n_bands=len(band_slices))
+            gamma_init = torch.tensor([0.0] * 8 + [1.2657] * (len(band_slices) - 8), dtype=torch.float32)
+            self.gamma_band_logits = nn.Parameter(gamma_init)
+            freqs = torch.linspace(0.0, 44100.0 / 2.0, 1025)
+            self.register_buffer("hf_band_mask", (freqs >= 6000.0) & (freqs < 22050.0), persistent=False)
+            if use_hf_def_routing:
+                self.hf_def_alpha_logit = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+                self.hf_def_tau = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+                self.hf_def_slope = 4.0
 
         # Shared sub-band multi-frame head: predicts 4 sub-bands x 6 taps x 8 (2x2 complex)
         self.mf_head = nn.Linear(embed_dim, 4 * self.n_taps_other * 8)
@@ -429,7 +555,6 @@ class MF7Decoder(nn.Module):
             mag_s = torch.sqrt(z_s.real**2 + z_s.imag**2 + 1e-12)
             u_p = f_w / mag_p
             u_s = z_s / mag_s
-            mag_fused = (1.0 - g_ms) * mag_p + g_ms * mag_s
 
             ph_logits = self.phase_gate_head(hs)  # (B, T, 24, 2)
             ph_seq = ph_logits.permute(0, 2, 3, 1).reshape(bsz * n_bands, 2, n_frames)
@@ -438,42 +563,99 @@ class MF7Decoder(nn.Module):
             g_ph_band = torch.sigmoid(ph_sm.reshape(bsz, n_bands, 2, n_frames).permute(0, 2, 1, 3) + self.gate_bias_init)
             g_ph = g_ph_band[:, :, self.band_map, :]  # (B, 2, F, T)
 
-            u_mix = (1.0 - g_ph) * u_p + g_ph * u_s
+            if self.use_reverb_routing:
+                cues = self.mod_cue_extractor(z_x, z_s)
+                rev_logit = self.reverb_head(h, cues)
+                p_rev = torch.sigmoid(rev_logit)
+                p_rev_4d = p_rev[:, None, None, None]
+                g_ph_eff = 1.0 - (1.0 - g_ph) * (1.0 - p_rev_4d)
+                gamma_bins = (0.90 * torch.sigmoid(self.gamma_band_logits))[self.band_map]
+                g_m_eff = g_ms + p_rev_4d * gamma_bins[None, None, :, None] * (1.0 - g_ms)
+                if self.use_hf_def_routing:
+                    ex_pow_m = z_x[:, 0].real**2 + z_x[:, 0].imag**2
+                    es_pow_m = z_s[:, 0].real**2 + z_s[:, 0].imag**2
+                    ex_hf_r = ex_pow_m[:, self.hf_band_mask, :].sum(dim=(-2, -1)) / (ex_pow_m.sum(dim=(-2, -1)) + 1e-8)
+                    es_hf_r = es_pow_m[:, self.hf_band_mask, :].sum(dim=(-2, -1)) / (es_pow_m.sum(dim=(-2, -1)) + 1e-8)
+                    lhr_hf = torch.log((es_hf_r + 1e-5) / (ex_hf_r + 1e-5))
+                    p_hf_def = torch.sigmoid(self.hf_def_slope * (lhr_hf - self.hf_def_tau))[:, None, None, None]
+                    alpha_hf = torch.sigmoid(self.hf_def_alpha_logit)
+                    w_hf = alpha_hf * p_hf_def * self.hf_band_mask[None, None, :, None].to(dtype=g_m_eff.dtype)
+                    g_m_eff = g_m_eff + w_hf * (1.0 - g_m_eff)
+                else:
+                    w_hf = None
+                    alpha_hf = None
+                    p_hf_def = None
+            else:
+                rev_logit = None
+                p_rev = None
+                g_ph_eff = g_ph
+                g_m_eff = g_ms
+                w_hf = None
+                alpha_hf = None
+                p_hf_def = None
+
+            mag_fused = (1.0 - g_m_eff) * mag_p + g_m_eff * mag_s
+            u_mix = (1.0 - g_ph_eff) * u_p + g_ph_eff * u_s
             u_norm = torch.sqrt(u_mix.real**2 + u_mix.imag**2 + 1e-6)
             u_out = u_mix / u_norm
             z_hat = mag_fused * u_out
         else:
             z_hat = (1.0 - g_ms) * f_w + g_ms * z_s
+            g_m_eff = g_ms
+            g_ph_eff = None
+            rev_logit = None
+            p_rev = None
         if self.use_additive_residual:
             r_ms = torch.stack([torch.cat(r_m_list, dim=1), torch.cat(r_s_list, dim=1)], dim=1)
+            if self.use_reverb_routing:
+                assert p_rev is not None
+                r_gate: torch.Tensor | float = 1.0 - p_rev[:, None, None, None]
+                if self.use_hf_def_routing and w_hf is not None:
+                    r_gate = r_gate * (1.0 - w_hf)
+            else:
+                r_gate = 1.0
             if self.residual_sweep is None:
-                z_hat = z_hat + self.residual_scale * r_ms
+                z_hat = z_hat + self.residual_scale * r_gate * r_ms
             else:
                 if bsz != 1:
                     raise ValueError("A residual sweep requires one input clip")
                 scales = r_ms.real.new_tensor(self.residual_sweep).view(-1, 1, 1, 1)
-                z_hat = z_hat + scales * r_ms
+                z_hat = z_hat + scales * r_gate * r_ms
         diag = {
-            # The training loss uses these terms. Convert to scalars at logging time.
-            "g_mean_M": g_m.mean(),
-            "g_mean_S": g_s.mean(),
+            # The training loss uses these terms. Convert 0-d tensors to scalars at logging time.
+            "g_mean_M": g_m_eff[:, 0].mean(),
+            "g_mean_S": g_m_eff[:, 1].mean(),
             "dw0_rms": torch.sqrt(torch.mean(dw0**2) + 1e-12),
             "dwk_rms": torch.sqrt(torch.mean(dwk_bins**2) + 1e-12),
         }
         if self.decoupled_fusion:
-            diag["g_ph_mean_M"] = g_ph[:, 0].mean()
-            diag["g_ph_mean_S"] = g_ph[:, 1].mean()
+            diag["g_ph_mean_M"] = g_ph_eff[:, 0].mean()
+            diag["g_ph_mean_S"] = g_ph_eff[:, 1].mean()
+        if self.use_reverb_routing:
+            assert rev_logit is not None and p_rev is not None
+            p_pow = f_w[:, 0].real**2 + f_w[:, 0].imag**2
+            p_hf_ratio = p_pow[:, self.hf_band_mask, :].sum(dim=(-2, -1)) / (p_pow.sum(dim=(-2, -1)) + 1e-8)
+            diag["rev_logit"] = rev_logit
+            diag["p_rev_mean"] = p_rev.mean()
+            diag["p_hf_ratio"] = p_hf_ratio
+            diag["gamma_hi_mean"] = (0.90 * torch.sigmoid(self.gamma_band_logits[8:])).mean()
+            diag["g_mag_item"] = 0.5 * (g_m_eff[:, 0].mean(dim=(-2, -1)) + g_m_eff[:, 1].mean(dim=(-2, -1))).detach()
+            diag["g_ph_item"] = 0.5 * (g_ph_eff[:, 0].mean(dim=(-2, -1)) + g_ph_eff[:, 1].mean(dim=(-2, -1))).detach()
+            if self.use_hf_def_routing and alpha_hf is not None and p_hf_def is not None:
+                diag["hf_def_alpha"] = alpha_hf.detach()
+                diag["hf_def_tau"] = self.hf_def_tau.detach()
+                diag["p_hf_def_mean"] = p_hf_def.mean().detach()
         if self.use_additive_residual:
             diag["res_rms"] = torch.sqrt(torch.mean(r_ms.abs() ** 2) + 1e-12).detach()
         return z_hat, diag
 
 
 class HybridV4Net(nn.Module):
-    """Unified Hybrid-v4 Network supporting V4-0..V4-4 and V4-5p (Decoupled Magnitude-Phase Fusion)."""
+    """Unified Hybrid-v4 Network supporting V4-0..V4-4 and V4-5p/V4-6/V4-7/V4-7c."""
 
     def __init__(
         self,
-        variant: Literal["v4_0", "v4_1", "v4_2", "v4_3", "v4_4", "v4_5p"],
+        variant: Literal["v4_0", "v4_1", "v4_2", "v4_3", "v4_4", "v4_5p", "v4_6", "v4_7", "v4_7c"],
         embed_dim: int = 64,
         n_blocks: int = 4,
         n_fft: int = 2048,
@@ -482,7 +664,7 @@ class HybridV4Net(nn.Module):
     ) -> None:
         super().__init__()
         self.variant = variant
-        self.has_teacher = variant in ("v4_1", "v4_2", "v4_3", "v4_4", "v4_5p")
+        self.has_teacher = variant in ("v4_1", "v4_2", "v4_3", "v4_4", "v4_5p", "v4_6", "v4_7", "v4_7c")
         self.n_fft = n_fft
         self.hop = hop
 
@@ -513,7 +695,7 @@ class HybridV4Net(nn.Module):
                 mf_offsets=MF9_DILATED_OFFSETS,
                 use_additive_residual=True,
             )
-        elif variant == "v4_5p":
+        elif variant in ("v4_5p", "v4_6"):
             self.decoder = MF7Decoder(
                 self.encoder.band_slices,
                 embed_dim=embed_dim,
@@ -522,6 +704,18 @@ class HybridV4Net(nn.Module):
                 use_additive_residual=True,
                 decoupled_fusion=True,
                 residual_scale=0.5,
+            )
+        elif variant in ("v4_7", "v4_7c"):
+            self.decoder = MF7Decoder(
+                self.encoder.band_slices,
+                embed_dim=embed_dim,
+                gate_bias_init=gate_bias_init,
+                mf_offsets=MF9_DILATED_OFFSETS,
+                use_additive_residual=True,
+                decoupled_fusion=True,
+                residual_scale=0.5,
+                use_reverb_routing=True,
+                use_hf_def_routing=(variant == "v4_7c"),
             )
         else:
             raise ValueError(f"Unknown variant: {variant}")
@@ -579,7 +773,7 @@ class HybridV4Net(nn.Module):
         if n_samples <= chunk_len:
             y_in, diag = self.forward_normalized(x_in, s_in, raw_stats, force_identity=force_identity)
             y_out = y_in * scale
-            if self.variant in ("v4_3", "v4_4", "v4_5p") and s is not None and not force_identity:
+            if self.variant in ("v4_3", "v4_4", "v4_5p", "v4_6", "v4_7") and s is not None and not force_identity:
                 rms_s = torch.sqrt(torch.mean(s.float() ** 2) + 1e-12)
                 if self.decoder.residual_sweep is not None:
                     rms_y = torch.sqrt(y_out.float().square().mean(dim=(1, 2), keepdim=True) + 1e-12)
@@ -588,7 +782,7 @@ class HybridV4Net(nn.Module):
                     rms_y = torch.sqrt(torch.mean(y_out.float() ** 2) + 1e-12)
                     if rms_s > 1e-6 and rms_y > 1e-6:
                         y_out = y_out * (rms_s / rms_y).to(y_out.dtype)
-            return y_out, {k: float(v.item()) for k, v in diag.items()}
+            return y_out, {k: float(v.item()) for k, v in diag.items() if v.ndim == 0}
 
         # Pad by hop_len on both sides (reflect) so Hann OLA sum_w == 1.0 everywhere
         pad_l = hop_len
@@ -615,12 +809,13 @@ class HybridV4Net(nn.Module):
             acc[:, :, st:en] += yc * win[None, None, :]
             w_sum[:, :, st:en] += win[None, None, :]
             for k, v in diag.items():
-                diag_acc.setdefault(k, []).append(float(v.item()))
+                if v.ndim == 0:
+                    diag_acc.setdefault(k, []).append(float(v.item()))
 
         y_pad = acc / torch.clamp(w_sum, min=1e-6)
         y_in = y_pad[:, :, pad_l : pad_l + n_samples]
         y_out = y_in * scale
-        if self.variant in ("v4_3", "v4_4", "v4_5p") and s is not None and not force_identity:
+        if self.variant in ("v4_3", "v4_4", "v4_5p", "v4_6", "v4_7") and s is not None and not force_identity:
             rms_s = torch.sqrt(torch.mean(s.float() ** 2) + 1e-12)
             if sweep is not None:
                 rms_y = torch.sqrt(y_out.float().square().mean(dim=(1, 2), keepdim=True) + 1e-12)

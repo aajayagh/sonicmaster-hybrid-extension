@@ -286,3 +286,354 @@ def test_v4_5p_decoupled_fusion_and_modspec_loss() -> None:
     assert float(m.decoder.phase_gate_head.weight.grad.abs().sum().item()) > 0.0
     assert m.decoder.per_bin_heads[0].weight.grad is not None
     assert torch.all(torch.isfinite(m.decoder.per_bin_heads[0].weight.grad))
+
+
+def test_v4_6_stage3_discriminator_and_band_ratio() -> None:
+    from scripts.extension.v4_discriminators import (
+        HybridV4Discriminator,
+        hinge_disc_loss,
+        hinge_gen_loss,
+        normalized_feature_matching_loss,
+    )
+    from scripts.extension.v4_losses import HybridV4Loss, SymmetricBandRatio6kLoss
+
+    torch.manual_seed(11)
+    m = HybridV4Net("v4_6", hop=512, gate_bias_init=-1.5)
+    assert count_parameters_breakdown(m)["total"] == 1_953_200
+
+    ckpt_p = ROOT / "artifacts/10_extension/v4/kaggle_out_v4_5p/out/v4_5p/best.pt"
+    assert ckpt_p.is_file(), f"Expected v4_5p checkpoint at {ckpt_p}"
+    ck = torch.load(ckpt_p, map_location="cpu", weights_only=False)
+    m.load_state_dict(ck["model"], strict=True)
+
+    # 1. SymmetricBandRatio6kLoss: zero on identical, symmetric, nonzero finite grad
+    br_loss = SymmetricBandRatio6kLoss()
+    a = (torch.randn(2, 2, 44100) * 0.1).requires_grad_(True)
+    b = torch.randn(2, 2, 44100) * 0.1
+    assert torch.allclose(br_loss(b, b), torch.zeros(()), atol=1e-6)
+    l_ab = br_loss(a, b)
+    l_ba = br_loss(b, a)
+    assert torch.isclose(l_ab, l_ba, rtol=1e-5, atol=1e-6)
+    l_ab.backward()
+    assert a.grad is not None and torch.all(torch.isfinite(a.grad)) and float(a.grad.abs().sum()) > 0.0
+
+    # 2. HybridV4Discriminator forward & losses
+    disc = HybridV4Discriminator()
+    d_params = sum(p.numel() for p in disc.parameters())
+    assert d_params > 0
+    r_lg, r_fm = disc(b)
+    f_lg, f_fm = disc(a.detach())
+    assert len(r_lg) == 6 and len(r_fm) == 6
+    assert all(torch.all(torch.isfinite(t)) for t in r_lg + f_lg)
+    assert float(hinge_disc_loss(r_lg, f_lg)) >= 0.0
+    assert float(hinge_gen_loss(f_lg)) >= 0.0
+    assert float(normalized_feature_matching_loss(r_fm, f_fm)) >= 0.0
+
+    # 3. Real 2-step D + G optimization loop verifying phase_gate_head grad & zero D mutation during G step
+    crit = HybridV4Loss()
+    opt_g = torch.optim.AdamW(m.parameters(), lr=1.5e-4)
+    opt_d = torch.optim.AdamW(disc.parameters(), lr=2e-4, betas=(0.5, 0.9))
+    x_in = torch.randn(1, 2, 44100) * 0.1
+    s_in = torch.randn(1, 2, 44100) * 0.1
+    c_in = torch.randn(1, 2, 44100) * 0.1
+    raw_stats = torch.zeros(1, 3)
+
+    for step_idx in range(2):
+        opt_g.zero_grad(set_to_none=True)
+        y_hat, diag = m.forward_normalized(x_in, s_in, raw_stats)
+
+        for p in disc.parameters():
+            p.requires_grad_(True)
+        opt_d.zero_grad(set_to_none=True)
+        rl_d, _ = disc(c_in)
+        fl_d, _ = disc(y_hat.detach())
+        l_d = hinge_disc_loss(rl_d, fl_d)
+        assert torch.isfinite(l_d)
+        l_d.backward()
+        opt_d.step()
+
+        d_snapshot = [p.detach().clone() for p in disc.parameters()]
+
+        for p in disc.parameters():
+            p.requires_grad_(False)
+        loss_rec, parts = crit(
+            y_hat,
+            c_in,
+            diag,
+            stage=2,
+            lambda_ms=1.0,
+            lambda_g=0.0,
+            lambda_kl=2.0,
+            lambda_br=0.25,
+            w_comp=0.0,
+            w_wav=0.0,
+            lambda_mod=2.0,
+        )
+        assert parts["l_comp"] == 0.0 and "l_br" in parts
+        with torch.no_grad():
+            _, r_fmaps_g = disc(c_in)
+        f_logits_g, f_fmaps_g = disc(y_hat)
+        l_adv = hinge_gen_loss(f_logits_g)
+        l_fm = normalized_feature_matching_loss(r_fmaps_g, f_fmaps_g)
+        loss_g = loss_rec + 0.05 * l_adv + 0.50 * l_fm
+        assert torch.isfinite(loss_g)
+        loss_g.backward()
+
+        assert m.decoder.phase_gate_head.weight.grad is not None
+        assert torch.all(torch.isfinite(m.decoder.phase_gate_head.weight.grad))
+        assert float(m.decoder.phase_gate_head.weight.grad.abs().sum()) > 0.0
+        assert m.decoder.per_bin_heads[0].weight.grad is not None
+        assert torch.all(torch.isfinite(m.decoder.per_bin_heads[0].weight.grad))
+        assert float(m.decoder.per_bin_heads[0].weight.grad.abs().sum()) > 0.0
+
+        opt_g.step()
+        for p in disc.parameters():
+            p.requires_grad_(True)
+
+        for p_before, p_after in zip(d_snapshot, disc.parameters()):
+            assert torch.equal(p_before, p_after), f"D mutated during G step {step_idx}"
+
+
+def test_v4_7_blind_reverb_routing_and_dual_bright() -> None:
+    from scripts.extension.v4_losses import HybridV4Loss
+
+    torch.manual_seed(17)
+    m = HybridV4Net("v4_7", hop=512, gate_bias_init=-1.5)
+    m6 = HybridV4Net("v4_6", hop=512, gate_bias_init=-1.5)
+
+    ckpt_p = ROOT / "artifacts/10_extension/v4/kaggle_out_v4_6/out/v4_6/best.pt"
+    assert ckpt_p.is_file(), f"Expected v4_6 checkpoint at {ckpt_p}"
+    ck = torch.load(ckpt_p, map_location="cpu", weights_only=False)
+    m6.load_state_dict(ck["model"], strict=True)
+
+    incompat = m.load_state_dict(ck["model"], strict=False)
+    assert len(incompat.unexpected_keys) == 0
+    assert len(incompat.missing_keys) > 0
+    assert all(k.startswith("decoder.reverb_head.") or k == "decoder.gamma_band_logits" for k in incompat.missing_keys)
+
+    # 1. WindowedModCueExtractor: exact zero when x == s, and length-invariant on periodic broadband audio (4s vs 8s)
+    period_len = 86 * 512  # exact 1.0s stride = 86 STFT frames
+    base_tile = torch.randn(1, 2, period_len) * 0.1
+    base_echo = 0.8 * base_tile + 0.2 * torch.roll(base_tile, 1000, dims=-1)
+    sig4 = base_tile.repeat(1, 1, 4)   # 4 * 86 = 344 frames (~4s)
+    echo4 = base_echo.repeat(1, 1, 4)
+    sig8 = base_tile.repeat(1, 1, 8)   # 8 * 86 = 688 frames (~8s)
+    echo8 = base_echo.repeat(1, 1, 8)
+    zx4 = stft_ms(lr_to_ms(sig4), n_fft=2048, hop=512)
+    zx8 = stft_ms(lr_to_ms(sig8), n_fft=2048, hop=512)
+    cues_same = m.decoder.mod_cue_extractor(zx4, zx4)
+    assert cues_same.shape == (1, 24, 6) and torch.allclose(cues_same, torch.zeros_like(cues_same), atol=1e-6)
+    zs4 = stft_ms(lr_to_ms(echo4), n_fft=2048, hop=512)
+    zs8 = stft_ms(lr_to_ms(echo8), n_fft=2048, hop=512)
+    assert torch.allclose(m.decoder.mod_cue_extractor(zx4, zs4), m.decoder.mod_cue_extractor(zx8, zs8), atol=2e-2)
+
+    # 2. Force p_rev -> 0 matches V4-6; p_rev -> 1 opens g_ph > 0.99, lifts g_mag, and damps R -> 0
+    m.eval()
+    m6.eval()
+    x_t = torch.randn(1, 2, 44100 * 3) * 0.1
+    s_t = torch.randn(1, 2, 44100 * 3) * 0.12
+    with torch.no_grad():
+        y6, _ = m6.forward_track(x_t, s_t, chunk_sec=4.0)
+        m.decoder.reverb_head.fc_out.bias.fill_(-12.0)
+        y7_off, d_off = m.forward_track(x_t, s_t, chunk_sec=4.0)
+        assert torch.max(torch.abs(y7_off - y6)) < 1e-3
+
+        m.decoder.reverb_head.fc_out.bias.fill_(10.0)
+        y7_on, d_on = m.forward_track(x_t, s_t, chunk_sec=4.0)
+        assert d_on["g_ph_mean_M"] > 0.99 and d_on["g_ph_mean_S"] > 0.99
+        assert d_on["g_mean_M"] > d_off["g_mean_M"] + 0.2 and d_on["g_mean_S"] > d_off["g_mean_S"] + 0.2
+        old_rs = m.decoder.residual_scale
+        m.decoder.residual_scale = 0.0
+        y7_noR, _ = m.forward_track(x_t, s_t, chunk_sec=4.0)
+        m.decoder.residual_scale = old_rs
+        assert torch.max(torch.abs(y7_on - y7_noR)) < 5e-3
+
+    # 3. Identity, x == s, silence, and RMS match
+    m_fresh = HybridV4Net("v4_7", hop=512, gate_bias_init=-1.5)
+    with torch.no_grad():
+        y_id, _ = m_fresh.forward_track(x_t, s_t, chunk_sec=4.0, force_identity=True)
+        rms_x = torch.sqrt(torch.mean(x_t**2) + 1e-8)
+        rms_s = torch.sqrt(torch.mean(s_t**2) + 1e-8)
+        assert torch.allclose(y_id, x_t * (rms_s / rms_x), atol=1e-4)
+
+        y_same, _ = m_fresh.forward_track(x_t, x_t.clone(), chunk_sec=4.0, force_identity=False)
+        assert torch.allclose(y_same, x_t, atol=1e-4)
+
+        y_sil, _ = m_fresh.forward_track(torch.zeros_like(x_t), torch.zeros_like(x_t), chunk_sec=4.0, force_identity=False)
+        assert torch.all(torch.isfinite(y_sil)) and torch.allclose(y_sil, torch.zeros_like(x_t), atol=1e-6)
+        assert torch.isclose(torch.sqrt(torch.mean(y7_off**2)), rms_s, rtol=1e-3)
+
+    # 4. Backward gradients flow cleanly through reverb_head, gamma_band_logits, phase_gate_head, and per_bin_heads
+    m.train()
+    crit = HybridV4Loss()
+    xb = torch.randn(2, 2, 44100 * 2) * 0.1
+    sb = torch.randn(2, 2, 44100 * 2) * 0.1
+    cb = torch.randn(2, 2, 44100 * 2) * 0.1
+    y_n, d_t = m.forward_normalized(xb, sb, torch.zeros(2, 3))
+    assert d_t["rev_logit"].shape == (2,) and d_t["p_hf_ratio"].shape == (2,)
+    loss, parts = crit(
+        y_n,
+        cb,
+        d_t,
+        stage=2,
+        lambda_ms=1.0,
+        lambda_g=0.0,
+        lambda_kl=2.0,
+        w_comp=0.15,
+        w_wav=0.10,
+        lambda_mod=2.0,
+        lambda_br=0.60,
+        lambda_br_p=0.25,
+        rev_target=torch.tensor([0.0, 1.0]),
+        lambda_rev=0.5,
+        rev_fp_weight=2.0,
+    )
+    assert "l_rev" in parts and "l_br_p" in parts and "l_br" in parts
+    loss.backward()
+    assert any(p.grad is not None and torch.all(torch.isfinite(p.grad)) and float(p.grad.abs().sum()) > 0.0 for p in m.decoder.reverb_head.parameters())
+    assert m.decoder.gamma_band_logits.grad is not None and torch.all(torch.isfinite(m.decoder.gamma_band_logits.grad)) and float(m.decoder.gamma_band_logits.grad.abs().sum()) > 0.0
+    assert m.decoder.phase_gate_head.weight.grad is not None and torch.all(torch.isfinite(m.decoder.phase_gate_head.weight.grad)) and float(m.decoder.phase_gate_head.weight.grad.abs().sum()) > 0.0
+    assert m.decoder.per_bin_heads[0].weight.grad is not None and torch.all(torch.isfinite(m.decoder.per_bin_heads[0].weight.grad)) and float(m.decoder.per_bin_heads[0].weight.grad.abs().sum()) > 0.0
+
+
+def test_v4_7b_bright_quad_log_loss_and_freeze_head():
+    from scripts.extension.v4_losses import HybridV4Loss, SymmetricBandRatio6kLoss
+
+    br = SymmetricBandRatio6kLoss(quad_scale=400.0, log_weight=0.15)
+    sig = torch.randn(2, 2, 44100 * 2) * 0.1
+    assert float(br(sig, sig).item()) < 1e-6
+
+    # Stronger outlier gradient with quad_scale=400.0
+    eh_out = torch.tensor([0.08], requires_grad=True)
+    eh_base = torch.tensor([0.08], requires_grad=True)
+    et_out = torch.tensor([0.03])
+    br._ratio_loss(eh_out, et_out, quad_scale=400.0, log_weight=0.0).backward()
+    br._ratio_loss(eh_base, et_out, quad_scale=0.0, log_weight=0.0).backward()
+    assert float(eh_out.grad.abs().item()) > float(eh_base.grad.abs().item())
+
+    # Stronger relative sensitivity at low-HF with log_weight=0.15
+    eh_low1 = torch.tensor([0.0007], requires_grad=True)
+    eh_low2 = torch.tensor([0.0007], requires_grad=True)
+    et_low = torch.tensor([0.0020])
+    br._ratio_loss(eh_low1, et_low, quad_scale=0.0, log_weight=0.15).backward()
+    br._ratio_loss(eh_low2, et_low, quad_scale=0.0, log_weight=0.0).backward()
+    assert float(eh_low1.grad.abs().item()) > float(eh_low2.grad.abs().item())
+
+    # Verify frozen reverb head receives zero parameter updates while per_bin_heads update
+    torch.manual_seed(11)
+    m = HybridV4Net("v4_7", hop=512, gate_bias_init=-1.5)
+    for n, p in m.named_parameters():
+        if n.startswith("decoder.reverb_head.") or n == "decoder.gamma_band_logits":
+            p.requires_grad_(False)
+    head_before = [p.detach().clone() for n, p in m.named_parameters() if n.startswith("decoder.reverb_head.") or n == "decoder.gamma_band_logits"]
+    perbin_before = m.decoder.per_bin_heads[0].weight.detach().clone()
+
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=1e-3)
+    crit = HybridV4Loss()
+    xb = torch.randn(2, 2, 44100 * 2) * 0.1
+    sb = torch.randn(2, 2, 44100 * 2) * 0.1
+    cb = torch.randn(2, 2, 44100 * 2) * 0.1
+    y_n, d_t = m.forward_normalized(xb, sb, torch.zeros(2, 3))
+    loss, _ = crit(
+        y_n,
+        cb,
+        d_t,
+        stage=2,
+        lambda_ms=1.5,
+        lambda_g=0.0,
+        lambda_kl=2.0,
+        w_comp=0.15,
+        w_wav=0.10,
+        lambda_mod=2.0,
+        lambda_br=2.0,
+        lambda_br_p=1.0,
+        br_quad_scale=400.0,
+        br_log_weight=0.15,
+        rev_target=torch.tensor([0.0, 1.0]),
+        lambda_rev=0.0,
+    )
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+
+    head_after = [p.detach() for n, p in m.named_parameters() if n.startswith("decoder.reverb_head.") or n == "decoder.gamma_band_logits"]
+    for hb, ha in zip(head_before, head_after):
+        assert torch.equal(hb, ha)
+    assert not torch.equal(perbin_before, m.decoder.per_bin_heads[0].weight.detach())
+
+
+def test_v4_7c_hf_deficit_routing_and_frozen_upstream():
+    from scripts.extension.v4_losses import HybridV4Loss
+
+    assert checkpoint_inference_config({}, "v4_7c")["gate_bias_init"] == -1.5
+    torch.manual_seed(23)
+    m7 = HybridV4Net("v4_7", hop=512, gate_bias_init=-1.5)
+    m7c = HybridV4Net("v4_7c", hop=512, gate_bias_init=-1.5)
+    p7 = count_parameters_breakdown(m7)
+    p7c = count_parameters_breakdown(m7c)
+    assert p7c["total"] == p7["total"] + 2 == 1966351
+
+    incompat = m7c.load_state_dict(m7.state_dict(), strict=False)
+    assert incompat.unexpected_keys == []
+    assert sorted(incompat.missing_keys) == ["decoder.hf_def_alpha_logit", "decoder.hf_def_tau"]
+
+    # Freeze encoder, blocks, reverb_head, and gamma_band_logits
+    frozen_before = []
+    for n, p in m7c.named_parameters():
+        if n.startswith("encoder.") or n.startswith("blocks.") or n.startswith("decoder.reverb_head.") or n == "decoder.gamma_band_logits":
+            p.requires_grad_(False)
+            frozen_before.append((n, p.detach().clone()))
+
+    # High E_s_hf / E_x_hf opens g_m_eff selectively at >=6kHz without changing g_ph_eff
+    m7.load_state_dict(m7.state_dict())
+    zx = torch.randn(1, 2, 1025, 172, dtype=torch.complex64) * 0.1
+    zs = zx.clone()
+    hf_mask = m7c.decoder.hf_band_mask
+    zx[:, :, hf_mask, :] *= 0.1
+    zs[:, :, hf_mask, :] *= 2.0
+    m7c.eval()
+    m7.eval()
+    # Sync shared weights into m7 to verify selective HF mag lift vs phase invariance
+    m7.load_state_dict({k: v for k, v in m7c.state_dict().items() if k in m7.state_dict()})
+    with torch.no_grad():
+        h_in = torch.randn(1, 172, 24, 64)
+        _, d7 = m7.decoder(h_in, zx, zs)
+        _, d7c = m7c.decoder(h_in, zx, zs)
+    assert torch.allclose(d7["rev_logit"], d7c["rev_logit"], atol=1e-6)
+    assert float(d7c["g_mean_M"]) > float(d7["g_mean_M"])
+    assert torch.allclose(d7c["g_ph_mean_M"], d7["g_ph_mean_M"], atol=1e-6)
+    assert torch.allclose(d7c["g_ph_mean_S"], d7["g_ph_mean_S"], atol=1e-6)
+
+    # One optimizer step keeps frozen upstream + reverb_head bitwise identical while updating hf_def & per_bin
+    m7c.train()
+    opt = torch.optim.AdamW([p for p in m7c.parameters() if p.requires_grad], lr=5e-4)
+    crit = HybridV4Loss()
+    t = torch.linspace(0, 1, 44100 * 2)
+    xb = (0.1 * torch.sin(2 * 3.14159 * 440 * t)).view(1, 1, -1).repeat(2, 2, 1)
+    sb = xb + (0.08 * torch.sin(2 * 3.14159 * 10000 * t)).view(1, 1, -1).repeat(2, 2, 1)
+    cb = sb.clone()
+    a0_before = m7c.decoder.hf_def_alpha_logit.detach().clone()
+    tau_before = m7c.decoder.hf_def_tau.detach().clone()
+    perbin_before = m7c.decoder.per_bin_heads[20].weight.detach().clone()
+    with torch.no_grad():
+        _, d_before = m7c.forward_normalized(xb, sb, torch.zeros(2, 3))
+    y_n, d_t = m7c.forward_normalized(xb, sb, torch.zeros(2, 3))
+    loss, _ = crit(y_n, cb, d_t, stage=2, lambda_ms=1.3, lambda_g=0.0, lambda_kl=2.0, w_comp=0.15, w_wav=0.10, lambda_mod=2.0, lambda_br=0.80, lambda_br_p=0.30)
+    opt.zero_grad()
+    loss.backward()
+    assert m7c.decoder.hf_def_alpha_logit.grad is not None and torch.isfinite(m7c.decoder.hf_def_alpha_logit.grad)
+    assert m7c.decoder.hf_def_tau.grad is not None and torch.isfinite(m7c.decoder.hf_def_tau.grad)
+    opt.step()
+
+    with torch.no_grad():
+        _, d_after = m7c.forward_normalized(xb, sb, torch.zeros(2, 3))
+    assert torch.equal(d_before["rev_logit"], d_after["rev_logit"])
+    for _, fb in frozen_before:
+        # Compare all frozen parameters directly from named_parameters
+        pass
+    frozen_after = dict(m7c.named_parameters())
+    for fn, fb in frozen_before:
+        assert torch.equal(fb, frozen_after[fn].detach())
+    assert not torch.equal(a0_before, m7c.decoder.hf_def_alpha_logit.detach())
+    assert not torch.equal(tau_before, m7c.decoder.hf_def_tau.detach())
+    assert not torch.equal(perbin_before, m7c.decoder.per_bin_heads[20].weight.detach())

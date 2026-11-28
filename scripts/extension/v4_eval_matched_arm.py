@@ -258,7 +258,7 @@ def main() -> None:
         "",
         "## 2. Đầy Đủ 15 Attribute Guards (Matched Common Protocol)",
         "",
-        "| Attribute | `n` | `input_err` | `A0_err` | `V4-4_err` | `V4-5p_err` | `V4-4_norm` | `V4-5p_norm` | Status |",
+        f"| Attribute | `n` | `input_err` | `A0_err` | `V4-4_err` | `{args.arm_name}_err` | `V4-4_norm` | `{args.arm_name}_norm` | Status |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for deg, gd in guards.items():
